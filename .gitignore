@@ -1,0 +1,12 @@
+# builds
+/build*/
+# the play and test folders: the dump's path, the library recompiled from it, saves, packs, caches, logs
+/run/
+/test/
+__pycache__/
+*.pyc
+# debugging output (PWR_VK_DUMPTEX, PWR_SEQ, PWR_GXDUMP, PWR_EVTRACE)
+*.pam
+*.ppm
+gxdump_*.bin
+evtrace.txt
