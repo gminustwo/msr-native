@@ -98,7 +98,10 @@ int video_option(const char *name, const char *value) {
     else if (!strcmp(name, "fullscreen") && (i = pick(value, fs_names, 3)) >= 0) { opt_fs = i; if (i) fs_last = i; }
     else if (!strcmp(name, "auto_gameplay") && (i = pick(value, layout_names, L_AUTO)) >= 0) opt_auto_gameplay = i;
     else if (!strcmp(name, "fsr_sharpness")) { char *e; double v = strtod(value, &e); if (*e || v < 0 || v > 2) return -1; opt_sharp = (float)v; }
-    else if (!strcmp(name, "resolution")) { i = atoi(value); if (i < 1 || i > 10) return -1; opt_res = i; pica_vk_quality(opt_res, opt_aniso); }
+    else if (!strcmp(name, "resolution")) {   /* 0: match the window (video_init, then each resize) */
+        char *e; long v = strtol(value, &e, 10); if (e == value || *e || v < 0 || v > 10) return -1;
+        opt_res_match = v == 0; if (v) { opt_res = (int)v; pica_vk_quality(opt_res, opt_aniso); }
+    }
     else if (!strcmp(name, "aniso")) { i = atoi(value); if (i != 1 && i != 2 && i != 4 && i != 8 && i != 16) return -1; opt_aniso = i; pica_vk_quality(opt_res, opt_aniso); }
     else if (!strcmp(name, "show_fps")) opt_fps = !strcmp(value, "1") || !strcmp(value, "on") || !strcmp(value, "true");   /* the overlay draws it, from the settings */
     else if (!strcmp(name, "vsync")) opt_vsync = !strcmp(value, "1") || !strcmp(value, "on") || !strcmp(value, "true");
@@ -325,6 +328,7 @@ static int gpu_init(void) {
 
 static int target_fps = 60;
 static int recreate_swapchain(void);
+static void match_resolution(int drawable_w, int drawable_h);
 /* above 60 FPS the main loop paces VBlank itself: present without waiting for the display (mailbox, else FIFO); without
    V-Sync, mailbox or else immediate (tearing) */
 static VkPresentModeKHR present_mode(void) {
@@ -510,6 +514,7 @@ int video_init(int scale) {
     hdr_detect();
     if (!gpu_ok) fprintf(stderr, "video: GPU presenter unavailable, scaling on the CPU (nearest)\n");
     if (create_swapchain()) return -1;
+    if (opt_res_match) { int w, h; SDL_Vulkan_GetDrawableSize(win, &w, &h); match_resolution(w, h); }   /* --resolution=0 */
 
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfam };
     VK(vkCreateCommandPool(dev, &pci, NULL, &pool));
@@ -584,14 +589,18 @@ void video_set_fullscreen(int on) { opt_fs = on ? fs_last : 0; apply_fullscreen(
 void video_show(int on) { if (!win) return; if (on) { SDL_ShowWindow(win); SDL_RaiseWindow(win); } else SDL_HideWindow(win); }
 SDL_Window *video_window(void) { return win; }
 void video_set_vsync(int on) { opt_vsync = on != 0; if (swap) recreate_swapchain(); }
-/* the 3D resolution: 1..4, or 0 to follow the window's height (240 lines each) */
-static void match_resolution(int drawable_h) {
-    int r = (drawable_h + SCR_H - 1) / SCR_H; r = r < 1 ? 1 : r > 10 ? 10 : r;
+/* the 3D resolution: 1..10, or 0 to follow the window: the 240-line multiple nearest the top screen's height as shown
+   (FSR takes the rest). By the window's whole height, rounded up, a 1280x800 Steam Deck got 4x: 1600x960 drawn for a
+   view of 720 lines (16:9) or 768 (the 3DS's 5:3); 3x now. */
+static void match_resolution(int drawable_w, int drawable_h) {
+    Rect t, b; layout_rects(drawable_w, drawable_h, &t, &b);
+    int lines = t.on && t.h >= 1 ? (int)(t.h + 0.5f) : drawable_h;
+    int r = (lines + SCR_H / 2) / SCR_H; r = r < 1 ? 1 : r > 10 ? 10 : r;
     if (r != opt_res) { opt_res = r; pica_vk_quality(opt_res, opt_aniso); }
 }
 void video_set_resolution(int factor) {
     opt_res_match = factor <= 0;
-    if (opt_res_match) { int w, h; SDL_Vulkan_GetDrawableSize(win, &w, &h); match_resolution(h); return; }
+    if (opt_res_match) { int w, h; SDL_Vulkan_GetDrawableSize(win, &w, &h); match_resolution(w, h); return; }
     opt_res = factor > 10 ? 10 : factor; pica_vk_quality(opt_res, opt_aniso);
 }
 int video_resolution(void) { return opt_res_match ? 0 : opt_res; }
@@ -972,7 +981,7 @@ int video_frame(void) {
 
     /* window resized or swapchain lost: rebuild before drawing */
     static int last_dw = -1, last_dh = -1; int dw, dh; SDL_Vulkan_GetDrawableSize(win, &dw, &dh);
-    if (last_dw >= 0 && (dw != last_dw || dh != last_dh)) { if (recreate_swapchain()) return 0; if (opt_res_match) match_resolution(dh); }
+    if (last_dw >= 0 && (dw != last_dw || dh != last_dh)) { if (recreate_swapchain()) return 0; if (opt_res_match) match_resolution(dw, dh); }
     last_dw = dw; last_dh = dh;
     msr_overlay_frame();   /* the settings overlay's actions: before an image is acquired, as V-Sync rebuilds the swapchain */
     {   /* save states: "Saved", "Loaded"... where the layout label goes */

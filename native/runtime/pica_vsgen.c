@@ -1,8 +1,9 @@
 /* PICA200 vertex shader -> GLSL -> SPIR-V, one specialized Vulkan shader module per guest program configuration.
- * Registers become local variables, swizzles and operand indices are fixed, the attribute permutation and the output
- * map are baked in. Flow control: the reachable code is split into basic blocks run by a switch(pc) dispatcher, with
- * an explicit call/if/loop stack (only emitted when the program uses one). Semantics mirror vs_run() in pica_sw.c
- * and shaders/pica_vs.vert (the interpreter used when no compiler is available).
+ * Registers become variables, swizzles and operand indices are fixed, the attribute permutation and the output map
+ * are baked in. Flow control: structured where it can be (2026-11-03, generate_structured: each range vs_run runs is a
+ * function, IF/LOOP/CALL are if/for/calls), else the reachable code is split into basic blocks run by a switch(pc)
+ * dispatcher, with an explicit call/if/loop stack (only emitted when the program uses one). Semantics mirror vs_run()
+ * in pica_sw.c and shaders/pica_vs.vert (the interpreter used when no compiler is available).
  * GLSL is compiled with libshaderc, loaded at run time (no build dependency); the module cache is keyed by a hash of
  * the program, swizzles, entry point, permutation and output map.
  * Compiles run on background threads (2026-11-02: one took 250-360 ms with the optimizer, 11-22 ms without, and the
@@ -164,8 +165,57 @@ static void emit_arith(uint32_t ins) {
 
 static int is_flow(uint32_t op) { return op >= 0x20 && op < 0x2e; }
 
-/* builds GLSL for the current registers; returns 0 on success */
-static int generate(void) {
+/* the GLSL before main(): uniforms, the attribute fetch, PICA arithmetic */
+static void emit_header(void) {
+    emit("#version 450\n"
+         "layout(set = 0, binding = 5, std140) uniform VsDraw { vec4 c[96]; uvec4 ib; uvec4 iu; uvec4 perm; uvec4 omap[2]; uvec4 fa[12]; vec4 fdef[12]; vec4 xf; } d;\n"
+         "layout(set = 0, binding = 7, std430) readonly buffer Raw { uint raw[]; };\n"
+         /* attribute a: d.fa[a] = (byte offset of vertex 0, stride, type | count << 4 | 0x100 when read from raw); else
+            the default d.fdef[a]. Types as the PICA loaders: 0 s8, 1 u8, 2 s16, 3 f32 (pica_vk.c fills these) */
+         "uint rb(uint a) { return (raw[a >> 2] >> ((a & 3u) * 8u)) & 0xffu; }\n"
+         "vec4 fetch(uint a) {\n"
+         "  uvec4 f = d.fa[a]; if ((f.z & 0x100u) == 0u) return d.fdef[a];\n"
+         "  uint p = f.x + uint(gl_VertexIndex) * f.y, t = f.z & 3u, n = (f.z >> 4) & 7u; vec4 v = vec4(0, 0, 0, 1);\n"
+         "  for (uint k = 0u; k < n; k++) {\n"
+         "    if (t == 3u) v[k] = uintBitsToFloat(raw[(p >> 2) + k]);\n"
+         "    else if (t == 2u) { uint q = p + 2u * k; v[k] = float(int(((raw[q >> 2] >> ((q & 2u) * 8u)) & 0xffffu) << 16) >> 16); }\n"
+         "    else { uint b = rb(p + k); v[k] = t == 0u ? float(int(b << 24) >> 24) : float(b); }\n"
+         "  }\n"
+         "  return v;\n"
+         "}\n"
+         "layout(location = 0) out vec4 v_col; layout(location = 1) out vec4 v_uv01; layout(location = 2) out vec3 v_uv2tw;\n"
+         "layout(location = 3) out vec4 v_quat; layout(location = 4) out vec3 v_view;\n"
+         "float pmul(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }\n"
+         "vec4 pmul4(vec4 a, vec4 b) { return vec4(pmul(a.x, b.x), pmul(a.y, b.y), pmul(a.z, b.z), pmul(a.w, b.w)); }\n"
+         "float dp3(vec4 a, vec4 b) { return pmul(a.x, b.x) + pmul(a.y, b.y) + pmul(a.z, b.z); }\n"
+         "float dp4(vec4 a, vec4 b) { return dp3(a, b) + pmul(a.w, b.w); }\n"
+         "float dph(vec4 a, vec4 b) { return dp3(a, b) + b.w; }\n"
+         "vec4 dst_(vec4 a, vec4 b) { return vec4(1.0, pmul(a.y, b.y), a.z, b.w); }\n"
+         "vec4 max_(vec4 a, vec4 b) { return vec4(a.x > b.x ? a.x : b.x, a.y > b.y ? a.y : b.y, a.z > b.z ? a.z : b.z, a.w > b.w ? a.w : b.w); }\n"
+         "vec4 min_(vec4 a, vec4 b) { return vec4(a.x < b.x ? a.x : b.x, a.y < b.y ? a.y : b.y, a.z < b.z ? a.z : b.z, a.w < b.w ? a.w : b.w); }\n"
+         "vec4 cr(int i) { return (i >= 0 && i < 96) ? d.c[i] : vec4(1.0); }\n"
+         "bool bu(uint i) { return ((d.ib.x >> i) & 1u) != 0u; }\n");
+}
+
+/* gl_Position and the varyings from the output registers by the output map */
+static void emit_outputs(void) {
+    char sem[24][16];
+    for (int i = 0; i < 24; i++) snprintf(sem[i], sizeof sem[i], "%s", i == 3 || i == 11 ? "1.0" : "0.0");
+    uint32_t nout = R(0x04F) & 7, mask = R(0x2BD);
+    for (uint32_t i = 0, o = 0; i < 16 && o < nout; i++) {
+        if (!((mask >> i) & 1)) continue;
+        uint32_t m = R(0x050 + o);
+        for (int c = 0; c < 4; c++) { uint32_t se = (m >> (8 * c)) & 0x1f; if (se < 24) snprintf(sem[se], sizeof sem[se], "o%u.%c", i, comp[c]); }
+        o++;
+    }
+    emit("  gl_Position = vec4((%s) * d.xf.x, (%s) * d.xf.y, -(%s), %s);\n", sem[0], sem[1], sem[2], sem[3]);   /* xf: pica_vk.c */
+    emit("  v_col = min(abs(vec4(%s, %s, %s, %s)), vec4(1.0));\n", sem[8], sem[9], sem[10], sem[11]);
+    emit("  v_uv01 = vec4(%s, %s, %s, %s);\n  v_uv2tw = vec3(%s, %s, %s);\n", sem[12], sem[13], sem[14], sem[15], sem[22], sem[23], sem[16]);
+    emit("  v_quat = vec4(%s, %s, %s, %s);\n  v_view = vec3(%s, %s, %s);\n}\n", sem[4], sem[5], sem[6], sem[7], sem[18], sem[19], sem[20]);
+}
+
+/* builds GLSL for the current registers as a dispatcher over basic blocks; returns 0 on success */
+static int generate_flat(void) {
     static uint8_t reach[4096], leader[4096];
     memset(reach, 0, sizeof reach); memset(leader, 0, sizeof leader);
     uint32_t entry = R(0x2BA) & 0xffff, work[8192]; int nw = 0, uses_stack = 0;
@@ -195,35 +245,8 @@ static int generate(void) {
     #undef LEAD
 
     olen = 0;
-    emit("#version 450\n"
-         "layout(set = 0, binding = 5, std140) uniform VsDraw { vec4 c[96]; uvec4 ib; uvec4 iu; uvec4 perm; uvec4 omap[2]; uvec4 fa[12]; vec4 fdef[12]; vec4 xf; } d;\n"
-         "layout(set = 0, binding = 7, std430) readonly buffer Raw { uint raw[]; };\n"
-         /* attribute a: d.fa[a] = (byte offset of vertex 0, stride, type | count << 4 | 0x100 when read from raw); else
-            the default d.fdef[a]. Types as the PICA loaders: 0 s8, 1 u8, 2 s16, 3 f32 (pica_vk.c fills these) */
-         "uint rb(uint a) { return (raw[a >> 2] >> ((a & 3u) * 8u)) & 0xffu; }\n"
-         "vec4 fetch(uint a) {\n"
-         "  uvec4 f = d.fa[a]; if ((f.z & 0x100u) == 0u) return d.fdef[a];\n"
-         "  uint p = f.x + uint(gl_VertexIndex) * f.y, t = f.z & 3u, n = (f.z >> 4) & 7u; vec4 v = vec4(0, 0, 0, 1);\n"
-         "  for (uint k = 0u; k < n; k++) {\n"
-         "    if (t == 3u) v[k] = uintBitsToFloat(raw[(p >> 2) + k]);\n"
-         "    else if (t == 2u) { uint q = p + 2u * k; v[k] = float(int(((raw[q >> 2] >> ((q & 2u) * 8u)) & 0xffffu) << 16) >> 16); }\n"
-         "    else { uint b = rb(p + k); v[k] = t == 0u ? float(int(b << 24) >> 24) : float(b); }\n"
-         "  }\n"
-         "  return v;\n"
-         "}\n"
-         "layout(location = 0) out vec4 v_col; layout(location = 1) out vec4 v_uv01; layout(location = 2) out vec3 v_uv2tw;\n"
-         "layout(location = 3) out vec4 v_quat; layout(location = 4) out vec3 v_view;\n"
-         "float pmul(float a, float b) { return (a == 0.0 || b == 0.0) ? 0.0 : a * b; }\n"
-         "vec4 pmul4(vec4 a, vec4 b) { return vec4(pmul(a.x, b.x), pmul(a.y, b.y), pmul(a.z, b.z), pmul(a.w, b.w)); }\n"
-         "float dp3(vec4 a, vec4 b) { return pmul(a.x, b.x) + pmul(a.y, b.y) + pmul(a.z, b.z); }\n"
-         "float dp4(vec4 a, vec4 b) { return dp3(a, b) + pmul(a.w, b.w); }\n"
-         "float dph(vec4 a, vec4 b) { return dp3(a, b) + b.w; }\n"
-         "vec4 dst_(vec4 a, vec4 b) { return vec4(1.0, pmul(a.y, b.y), a.z, b.w); }\n"
-         "vec4 max_(vec4 a, vec4 b) { return vec4(a.x > b.x ? a.x : b.x, a.y > b.y ? a.y : b.y, a.z > b.z ? a.z : b.z, a.w > b.w ? a.w : b.w); }\n"
-         "vec4 min_(vec4 a, vec4 b) { return vec4(a.x < b.x ? a.x : b.x, a.y < b.y ? a.y : b.y, a.z < b.z ? a.z : b.z, a.w < b.w ? a.w : b.w); }\n"
-         "vec4 cr(int i) { return (i >= 0 && i < 96) ? d.c[i] : vec4(1.0); }\n"
-         "bool bu(uint i) { return ((d.ib.x >> i) & 1u) != 0u; }\n"
-         "void main() {\n");
+    emit_header();
+    emit("void main() {\n");
     uint32_t nattr = (uint32_t)pica_num_attrs();
     uint64_t perm = (uint64_t)R(0x2BB) | (uint64_t)R(0x2BC) << 32;
     for (int i = 0; i < 16; i++) emit("  vec4 v%d = vec4(0, 0, 0, 1), r%d = vec4(0), o%d = vec4(0);\n", i, i, i);
@@ -287,21 +310,117 @@ static int generate(void) {
     }
     #undef PUSH
     emit("    default: pc = 4096u; break;\n    }\n    if (pc >= 4096u) break;\n  }\n");
-    /* output map */
-    char sem[24][16];
-    for (int i = 0; i < 24; i++) snprintf(sem[i], sizeof sem[i], "%s", i == 3 || i == 11 ? "1.0" : "0.0");
-    uint32_t nout = R(0x04F) & 7, mask = R(0x2BD);
-    for (uint32_t i = 0, o = 0; i < 16 && o < nout; i++) {
-        if (!((mask >> i) & 1)) continue;
-        uint32_t m = R(0x050 + o);
-        for (int c = 0; c < 4; c++) { uint32_t se = (m >> (8 * c)) & 0x1f; if (se < 24) snprintf(sem[se], sizeof sem[se], "o%u.%c", i, comp[c]); }
-        o++;
-    }
-    emit("  gl_Position = vec4((%s) * d.xf.x, (%s) * d.xf.y, -(%s), %s);\n", sem[0], sem[1], sem[2], sem[3]);   /* xf: pica_vk.c */
-    emit("  v_col = min(abs(vec4(%s, %s, %s, %s)), vec4(1.0));\n", sem[8], sem[9], sem[10], sem[11]);
-    emit("  v_uv01 = vec4(%s, %s, %s, %s);\n  v_uv2tw = vec3(%s, %s, %s);\n", sem[12], sem[13], sem[14], sem[15], sem[22], sem[23], sem[16]);
-    emit("  v_quat = vec4(%s, %s, %s, %s);\n  v_view = vec3(%s, %s, %s);\n}\n", sem[4], sem[5], sem[6], sem[7], sem[18], sem[19], sem[20]);
+    emit_outputs();
     return 0;
+}
+
+/* ---- the structured form (2026-11-03) ----
+   The dispatcher (a loop over a switch of basic blocks, with an explicit stack) keeps every register live around one
+   loop. On the Steam Deck's GPU (RADV, 8 CUs) the game's skinned and lit programs compiled to 20-46k instructions with
+   all 256 VGPRs, 100 of them spilled to scratch: ~7 ms of a 60 Hz frame for ~20k vertices, on top of the ~4 ms the
+   rest of the frame takes there (PWR_VK_CPU_VS=1 showed it). vs_run (pica_sw.c) is structured: each range it runs (a
+   call, an IF's halves, a loop's body) is a frame that ends with 0 (the range ran out), 1 (END) or 2 (BREAK). Here each
+   such range is a GLSL function with that result, IF/LOOP/CALL are if/for/calls and the registers are globals, which
+   the driver inlines into straight code. Programs with jumps (JMPC/JMPU) or deeper nesting than vs_run allows keep
+   the dispatcher. PWR_VSGEN_FLAT=1: the dispatcher for every program (A/B). */
+#define MAX_REGIONS 512
+static struct { uint16_t start, end; int8_t depth; } regions[MAX_REGIONS];
+static int nregions;
+static const char *sfail;   /* why a program keeps the dispatcher (PWR_VSGEN_TRACE) */
+static int is_plain(uint32_t op) { return !is_flow(op) || op == 0x21 || op == 0x2a || op == 0x2b; }   /* arithmetic, NOP, EMIT/SETEMIT */
+/* the ranges vs_run runs from [start, end) at this depth, into regions[]; -1 when the structured form does not apply */
+static int region_scan(uint32_t start, uint32_t end, int depth) {
+    if (start >= end || start >= 4096) return 0;   /* runs nothing: no function */
+    if (depth > 8) { sfail = "nesting deeper than 8"; return -1; }   /* vs_run ends the program there */
+    int i = 0;
+    while (i < nregions && !(regions[i].start == start && regions[i].end == end)) i++;
+    if (i < nregions) { if (regions[i].depth >= depth) return 0; regions[i].depth = (int8_t)depth; }   /* deeper: its calls too */
+    else {
+        if (nregions == MAX_REGIONS) { sfail = "too many ranges"; return -1; }
+        nregions++; regions[i].start = (uint16_t)start; regions[i].end = (uint16_t)end; regions[i].depth = (int8_t)depth;
+    }
+    for (uint32_t pc = start; pc < end && pc < 4096; ) {
+        uint32_t ins = prog[pc], op = ins >> 26, dst = (ins >> 10) & 0xfff, num = ins & 0xff;
+        if (is_plain(op) || op == 0x23) { pc++; continue; }   /* BREAKC: a return */
+        if (op == 0x22 || op == 0x20) break;                  /* END, BREAK: nothing after them runs */
+        if (op >= 0x24 && op <= 0x26) { if (region_scan(dst, dst + num, depth + 1)) return -1; pc++; continue; }
+        if (op == 0x27 || op == 0x28) {
+            if (dst + num <= pc) { sfail = "an IF ending before itself"; return -1; }
+            if (region_scan(pc + 1, dst, depth + 1) || region_scan(dst, dst + num, depth + 1)) return -1;
+            pc = dst + num; continue;
+        }
+        if (op == 0x29) {
+            if (dst + 1 <= pc) { sfail = "a LOOP ending before itself"; return -1; }
+            if (region_scan(pc + 1, dst + 1, depth + 1)) return -1;
+            pc = dst + 1; continue;
+        }
+        sfail = "jumps (JMPC/JMPU)"; return -1;
+    }
+    return 0;
+}
+/* the call of range [start, end) as an expression: its function, or 0 for an empty range */
+static void region_call(char *buf, size_t n, uint32_t start, uint32_t end) {
+    if (start >= end || start >= 4096) snprintf(buf, n, "0"); else snprintf(buf, n, "f%u_%u()", start, end);
+}
+/* one range's function body, as vs_run runs it */
+static void region_body(uint32_t start, uint32_t end) {
+    char cnd[96], a[32], b[32];
+    for (uint32_t pc = start; pc < end && pc < 4096; ) {
+        uint32_t ins = prog[pc], op = ins >> 26, dst = (ins >> 10) & 0xfff, num = ins & 0xff;
+        if (is_plain(op)) { if (!is_flow(op)) emit_arith(ins); pc++; continue; }
+        switch (op) {
+        case 0x22: emit("    return 1;\n"); return;                                            /* END */
+        case 0x20: emit("    return 2;\n"); return;                                            /* BREAK */
+        case 0x23: cond_expr(cnd, sizeof cnd, ins); emit("    if (%s) return 2;\n", cnd); pc++; continue;   /* BREAKC */
+        case 0x24: case 0x25: case 0x26:                         /* CALL / CALLC / CALLU: an END in it ends the program, a BREAK only it */
+            if (op == 0x24) snprintf(cnd, sizeof cnd, "true");
+            else if (op == 0x25) cond_expr(cnd, sizeof cnd, ins);
+            else snprintf(cnd, sizeof cnd, "bu(%uu)", (ins >> 22) & 15);
+            region_call(a, sizeof a, dst, dst + num);
+            if (strcmp(a, "0")) emit("    if (%s) { if (%s == 1) return 1; }\n", cnd, a);
+            pc++; continue;
+        case 0x27: case 0x28:                                    /* IFU / IFC: [pc + 1, dst) or [dst, dst + num), whose END or BREAK goes up */
+            if (op == 0x27) snprintf(cnd, sizeof cnd, "bu(%uu)", (ins >> 22) & 15); else cond_expr(cnd, sizeof cnd, ins);
+            region_call(a, sizeof a, pc + 1, dst); region_call(b, sizeof b, dst, dst + num);
+            emit("    { int r_ = 0; if (%s) r_ = %s; else r_ = %s; if (r_ != 0) return r_; }\n", cnd, a, b);
+            pc = dst + num; continue;
+        case 0x29:                                               /* LOOP i: aL = init; count + 1 runs of [pc + 1, dst] */
+            region_call(a, sizeof a, pc + 1, dst + 1);
+            emit("    { uint iu_ = d.iu[%u]; aL = int((iu_ >> 8) & 0xffu); int n_ = int(iu_ & 0xffu), s_ = int(iu_ << 8) >> 24;\n"
+                 "      for (int k_ = 0; k_ <= n_; k_++) { int r_ = %s; if (r_ == 1) return 1; if (r_ == 2) break; aL += s_; } }\n",
+                 (ins >> 22) & 3, a);
+            pc = dst + 1; continue;
+        default: return;   /* jumps: region_scan sent the program to the dispatcher */
+        }
+    }
+    emit("    return 0;\n");
+}
+/* builds GLSL for the current registers in the structured form; returns 0 on success, -1 for the dispatcher */
+static int generate_structured(void) {
+    uint32_t entry = R(0x2BA) & 0xffff;
+    if (entry >= 4096) { sfail = "entry point out of range"; return -1; }
+    nregions = 0; sfail = NULL;
+    if (region_scan(entry, 4096, 0)) return -1;
+    olen = 0;
+    emit_header();
+    for (int i = 0; i < 16; i++) emit("vec4 v%d = vec4(0, 0, 0, 1), r%d = vec4(0), o%d = vec4(0);\n", i, i, i);
+    emit("int a0x = 0, a0y = 0, aL = 0; bool cx = false, cy = false;\n");
+    for (int i = 0; i < nregions; i++) emit("int f%u_%u();\n", regions[i].start, regions[i].end);
+    for (int i = 0; i < nregions; i++) { emit("int f%u_%u() {\n", regions[i].start, regions[i].end); region_body(regions[i].start, regions[i].end); emit("}\n"); }
+    emit("void main() {\n");
+    uint32_t nattr = (uint32_t)pica_num_attrs();
+    uint64_t perm = (uint64_t)R(0x2BB) | (uint64_t)R(0x2BC) << 32;
+    for (uint32_t a = 0; a < nattr && a < 12; a++) emit("  v%u = fetch(%uu);\n", (uint32_t)(perm >> (4 * a)) & 15, a);
+    emit("  f%u_4096();\n", entry);
+    emit_outputs();
+    return 0;
+}
+static int vsgen_flat(void) { static int f = -1; if (f < 0) f = getenv("PWR_VSGEN_FLAT") != NULL; return f; }
+static const char *gen_form;   /* the form generate() chose (PWR_VSGEN_TRACE) */
+static int generate(void) {
+    if (!vsgen_flat() && !generate_structured()) { gen_form = "structured"; return 0; }
+    gen_form = vsgen_flat() ? "dispatcher (PWR_VSGEN_FLAT)" : sfail ? sfail : "dispatcher";
+    return generate_flat();
 }
 
 /* ---- cache ---- */
@@ -332,7 +451,7 @@ int pica_vsgen_count(void) { pthread_mutex_lock(&cache_lock); int n = ncache; pt
 #ifndef MSR_VSGEN_SHA256
 #define MSR_VSGEN_SHA256 __DATE__ " " __TIME__
 #endif
-const char *pica_vsgen_build(void) { static char b[48]; snprintf(b, sizeof b, "vsgen %.24s O%d", MSR_VSGEN_SHA256, vsgen_opt()); return b; }
+const char *pica_vsgen_build(void) { static char b[48]; snprintf(b, sizeof b, "vsgen %.24s O%d%s", MSR_VSGEN_SHA256, vsgen_opt(), vsgen_flat() ? " flat" : ""); return b; }
 int pica_vsgen_get(int i, uint64_t *key, const uint32_t **spv, size_t *size) {
     int ok = 0;
     pthread_mutex_lock(&cache_lock);
@@ -437,7 +556,10 @@ VkShaderModule pica_vsgen_module(VkDevice dev) {
         return m;
     }
     pthread_mutex_unlock(&cache_lock);
-    if (generate()) {
+    int gen_failed = generate();
+    { static int trace = -1; if (trace < 0) trace = getenv("PWR_VSGEN_TRACE") != NULL;
+      if (trace) fprintf(stderr, "vsgen: %016llx %s\n", (unsigned long long)key, gen_failed ? "not generated" : gen_form); }
+    if (gen_failed) {
         pthread_mutex_lock(&cache_lock); g_vsgen_failed++; cache_add_locked(key, VK_NULL_HANDLE, NULL, 0, 0); pthread_mutex_unlock(&cache_lock);
         return VK_NULL_HANDLE;
     }

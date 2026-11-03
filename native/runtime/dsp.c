@@ -234,7 +234,7 @@ static void audio_cb(void *u, Uint8 *stream, int len) {
     }
 }
 
-static void wav_close(void) {
+void dsp_close_wav(void) {   /* also main.c, which ends without atexit on Linux */
     if (!wavf) return;
     uint32_t data = wav_frames * 4, rate = 32728, br = rate * 4, v;
     fseek(wavf, 4, SEEK_SET); v = 36 + data; fwrite(&v, 4, 1, wavf);
@@ -247,7 +247,7 @@ static void audio_open(void) {
     const char *w = getenv("PWR_DSP_WAV");
     if (w && (wavf = fopen(w, "wb"))) {
         uint8_t h[44] = { 'R','I','F','F',0,0,0,0,'W','A','V','E','f','m','t',' ',16,0,0,0,1,0,2,0, 0xD8,0x7F,0,0, 0x60,0xFF,1,0, 4,0,16,0, 'd','a','t','a',0,0,0,0 };
-        fwrite(h, 1, 44, wavf); atexit(wav_close);
+        fwrite(h, 1, 44, wavf); atexit(dsp_close_wav);
     }
     if (g_mute) {   /* PWR_DSP_DUMMY_TEST=1: exercise the SDL path while muted, on SDL's dummy driver (cannot make a sound) */
         if (!getenv("PWR_DSP_DUMMY_TEST")) return;

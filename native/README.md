@@ -167,8 +167,21 @@ every batch.
 - The GX queue is never full for the game (gsp.c's enqueue hook waits for the worker): with two threads queueing, a
   failed enqueue let the other thread's command in first and the file select's bottom screen jittered at 144 FPS.
 - Not here: texture dumping, the randomizer's remote connection (Randovania's tracker: no `soc:U`).
-- Linux: the public AppImage ships it (`tools/msr/linux/build_appimage.sh`, when Vulkan's headers and glslc or
-  glslangValidator are there); tested in WSL on llvmpipe only, not yet on a Steam Deck.
+- Linux: the public AppImage ships it (`tools/package/appimage.sh`, when Vulkan's headers and glslc or
+  glslangValidator are there). Tested on a Steam Deck OLED (RADV, 2026-11-03), at the landing site with the 4x texture
+  pack, `PWR_GX_STATS=1` and `--fps=144` for the most it does:
+  - The GPU's vertex work had been most of its frame (`PWR_VK_CPU_VS=1` took it off: 11 ms of GPU a frame at 2x became
+    3.8). The dispatcher form of the translated shaders compiled to 20-46k instructions with all 256 VGPRs, 100 of them
+    spilled: 55 FPS at 4x, 74 at 2x, and 20-38 in play at 4x. The structured form (`pica_vsgen.c`
+    generate_structured: 40 VGPRs, ~2.5k instructions, no spills) gives 77-80 at 4x, 98-104 at 3x, 95-111 at 2x, and 60
+    held at 4x in play; the picture is the dispatcher's (0.01-0.04% of pixels differ, by the animation's timing, one
+    second after a quick load). `PWR_VSGEN_FLAT=1` keeps the dispatcher (A/B). The interpreter shader (`pica_vs.vert`,
+    a new program's draws until its translation is built) is as heavy, for those moments only.
+  - The game never exited: once its window closed (or Restart, or SIGTERM) `exit()`'s static destructors waited in
+    glibc's `pthread_cond_destroy` for the texture packs' PNG workers, which never leave their condition variable. On
+    Linux main() now ends with `_exit` after the shutdown.
+  - "Match window" (`--resolution=0`, which the launcher had turned into 2x as the option refused 0) follows the top
+    screen as shown, the nearest 240-line multiple: 3x on the Deck's 1280x800 (it was 4x by the window's height).
 
 **From the launcher:** once the native code is built, the Game tab's "Without the emulator (experimental)" makes Play
 start `msr-native` (beside the exe) with `--layout=single --scale=3 --resolution=<the launcher's> --filter=fsr`, plus

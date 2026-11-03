@@ -785,7 +785,7 @@ bool StartGame() {
     const int resolution = static_cast<int>(file.Number("native", "resolution", 4));
     const int volume = static_cast<int>(file.Number("native", "volume", 100));
     std::vector<std::string> args{Utf8(ExePath()), "--play", "--layout=single", "--scale=3",
-                                  "--resolution=" + std::to_string(resolution <= 0 ? 2 : std::min(resolution, 10)),
+                                  "--resolution=" + std::to_string(std::clamp(resolution, 0, 10)),   // 0: match the window
                                   "--filter=fsr", "--volume=" + std::to_string(std::clamp(volume, 0, 100))};
     if (fullscreen) args.push_back("--fullscreen=borderless");
     if (!vsync) args.push_back("--vsync=off");

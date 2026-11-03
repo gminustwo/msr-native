@@ -31,6 +31,8 @@
 #ifdef _WIN32
 #include <windows.h>
 #include <timeapi.h>
+#else
+#include <unistd.h>
 #endif
 
 int g_input_none, g_mute;
@@ -426,5 +428,14 @@ int main(int argc, char **argv) {
     fprintf(stderr, "native: %s\n", *done ? "guest main returned" : g_exit == MSR_EXIT_RESTART ? "restart" : "window closed");
     { extern void pica_vk_saves_wait(void); pica_vk_saves_wait(); }   /* a shader cache save under way lands first */
     video_shutdown();
+#ifndef _WIN32
+    /* Linux: ends here, without exit()'s static destructors. The guest threads, the GX worker and the texture packs'
+       PNG workers are still running, and glibc's pthread_cond_destroy waits for the waiters of a condition variable:
+       the PNG workers' (msr/textures.cpp) never left, so the game never exited once its window closed or Restart was
+       chosen (2026-11-03, Steam Deck: the launcher waited for it). Windows' runtime does not wait there. */
+    { extern void dsp_close_wav(void); dsp_close_wav(); }   /* PWR_DSP_WAV's header (atexit) */
+    fflush(NULL);
+    _exit(g_exit > 0 ? g_exit : 0);
+#endif
     return g_exit > 0 ? g_exit : 0;
 }
