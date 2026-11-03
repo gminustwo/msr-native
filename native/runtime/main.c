@@ -2,7 +2,10 @@
  * The game's ARM code runs from the module the launcher builds from the player's own dump (tools/msr/recomp,
  * msr_aot.dll / libmsr_aot.so); the 3DS kernel, services, GPU and DSP are this runtime (from Woohoo! Flight School).
  *
- * usage: msr-native --dump <dump.3ds|.cci|.cxi> [--module <library>] [options]
+ * Started on its own (no options, or --launcher) it is the launcher (msr/launcher.cpp): the settings menu with the
+ * game file, the native code's build and Play, which starts this program again with --play and the options below.
+ *
+ * usage: msr-native [--play] [--dump <dump.3ds|.cci|.cxi>] [--module <library>] [options]
  *   --dump        the decrypted dump (also $MSR_DUMP, or the first line of user/msr/game-path.txt)
  *   --module      the recompiled code (default user/msr/recomp/msr_aot.dll, libmsr_aot.so on Linux)
  *   --input=none  never open real input devices (headless runs)    --mute  no audio output
@@ -260,8 +263,17 @@ static void log_buffered(void) {
 #endif
 }
 
+int msr_launcher_main(void);
+
 int main(int argc, char **argv) {
+#ifdef _WIN32
+    {   /* a window program: from a console without a redirection, the log goes to that console */
+        HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+        if (argc > 1 && (h == NULL || h == INVALID_HANDLE_VALUE) && AttachConsole(ATTACH_PARENT_PROCESS)) freopen("CONOUT$", "w", stderr);
+    }
+#endif
     log_buffered();
+    if (argc == 1 || (argc == 2 && !strcmp(argv[1], "--launcher"))) return msr_launcher_main();
     int scale = 2, fps = 0, volume = 100, packs_given = 0;
     const char *dump = getenv("MSR_DUMP"), *module = NULL, *settings = NULL;
     static char game_path[4096], module_path[4096], save_path[4096];
@@ -270,7 +282,8 @@ int main(int argc, char **argv) {
     timeBeginPeriod(1);   /* sleeps (the 60 Hz loop, the DSP clock's ~5 ms ticks) otherwise round up to the 15.6 ms tick */
 #endif
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--input=none")) g_input_none = 1;
+        if (!strcmp(argv[i], "--play")) continue;   /* the launcher's: the game itself */
+        else if (!strcmp(argv[i], "--input=none")) g_input_none = 1;
         else if (!strcmp(argv[i], "--mute")) g_mute = 1;
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc) dump = argv[++i];
         else if (!strcmp(argv[i], "--module") && i + 1 < argc) module = argv[++i];

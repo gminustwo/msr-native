@@ -18,6 +18,13 @@
 - Test keys (`shot.ps1`, VK hex): F 46 / Enter 0D = A, Space 20 = B, Tab 09 = Start, WASD 57 41 53 44 (arrows 25-28
   too), Q 51 = L, E 45 = R, Shift 10 = Morph Ball, C 43 = next beam, F1 70. From boot, to play on test file B:
   `46:200,wait6000,28:150,wait800,0D:200,wait2500,0D:200,wait16000,shot`.
+- The launcher (no options) in tests: `shot.ps1 -GameArgs '' -Keys '0D:150,...'` (Enter is Play; its user folder is
+  the test folder via MSR_NATIVE_HOME; the game it starts is a child process, found and stopped by the script). A first
+  build from nothing: `-Folder <repo>\test-build` with only `user\msr\game-path.txt`, and `MSR_BUILD_JOBS=8` (the
+  launcher otherwise uses every thread).
+- Releases: README.md (Releases). The Linux build runs in WSL Ubuntu, launched from PowerShell (Git Bash mangles
+  /mnt paths); WSL has no SDL2 headers and sudo needs a password, so SDL2 is built from
+  ~/samus-build/src/externals/sdl2/SDL (`MSR_SDL2_SOURCE`).
 - `native/README.md` documents the runtime, its Samus Returns parts and the debugging switches (`PWR_*`).
 - The emulator-based build (Azahar fork, Qt launcher) is the separate `samus-recomps` repository. It shares `src/msr`
   with this one, and changes there are not synced automatically.

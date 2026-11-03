@@ -124,6 +124,23 @@ struct ModsSnapshot {
     bool texture_options = true; ///< Preload and dump can be changed (msr-native always preloads, never dumps)
 };
 
+/// msr-native's launcher: the menu before the game runs (native/runtime/msr/launcher.cpp). Its
+/// Game tab starts with Play, the game file and the native code (the game's code recompiled from
+/// the player's dump). Built and applied on the launcher's thread.
+struct LauncherSnapshot {
+    enum class Code { Missing, Ready, Outdated, Building, Failed };
+    bool active = false;     ///< The menu is the launcher (no game running)
+    std::string version;     ///< "msr-native 0.1.0"
+    std::string game;        ///< The dump's path, empty when none was chosen
+    std::string game_note;   ///< What is wrong with it, or empty
+    Code code = Code::Missing;
+    std::string code_note;   ///< When it was built, the build's step, or what failed
+    float progress = -1.f;   ///< The build's progress, 0..1, or -1 when unknown
+    bool can_play = false;
+    bool can_browse = false; ///< A file dialog is there
+    std::string folder;      ///< The user folder (saves, settings, mods)
+};
+
 struct OverlayAction {
     enum class Kind {
         Emulator,         ///< Apply `emulator`
@@ -148,10 +165,17 @@ struct OverlayAction {
         ModsFolder,       ///< Open the texture packs folder
         PreloadTextures,  ///< Load every pack texture at boot (`value` 0 or 1)
         DumpTextures,     ///< Save the game's textures for making packs (`value` 0 or 1)
+        LauncherPlay,     ///< Start the game
+        LauncherBuild,    ///< Build the native code from the game file
+        LauncherCancel,   ///< Stop the build
+        LauncherBrowse,   ///< Choose the game file with a file dialog
+        LauncherGame,     ///< The game file typed in: `text`
+        LauncherFolder,   ///< Open the user folder
     };
     Kind kind;
     EmulatorSettings emulator{};
     int value = 0;
+    std::string text{};
 };
 
 class Overlay final : public OverlayHook::Interface {
@@ -172,6 +196,11 @@ public:
     void SetPlayerSettings(const PlayerSettings& settings);
     void SetControls(const ControlsSnapshot& controls);
     void SetMods(const ModsSnapshot& mods);
+    /// msr-native: the launcher's state; while it is active the menu stays open.
+    void SetLauncher(const LauncherSnapshot& launcher);
+    bool LauncherActive() const {
+        return launcher_active.load();
+    }
     PlayerSettings GetPlayerSettings();
     /// ImGui key events (ImGuiKey values), mouse in framebuffer pixels.
     void Key(int key, bool down);
@@ -195,7 +224,10 @@ private:
     };
 
     void Push(const Event& event);
-    void Act(OverlayAction::Kind kind, int value = 0);
+    void Act(OverlayAction::Kind kind, int value = 0, std::string text = {});
+    /// The launcher's part of the Game tab: Play, the game file, the native code.
+    void DrawLauncher(const LauncherSnapshot& launcher, float label_width,
+                      const std::function<void()>& default_focus);
     void DrawControls(float scale, float label_width, const std::function<void()>& default_focus);
     void DrawGameMods(const std::function<void()>& default_focus);
     void DrawTexturePacks(float label_width, const std::function<void()>& default_focus);
@@ -220,6 +252,7 @@ private:
     void EmulatorChanged();
 
     std::atomic<bool> visible{false};
+    std::atomic<bool> launcher_active{false};
     std::atomic<double> hint_started{-1.0};
 
     std::mutex mutex; ///< Guards the queues and the settings snapshots below
@@ -229,6 +262,7 @@ private:
     EmulatorSettings emulator;
     ControlsSnapshot controls;
     ModsSnapshot mods;
+    LauncherSnapshot launcher;
 
     // Renderer thread only
     ImGuiContext* context{};
@@ -243,6 +277,8 @@ private:
     float hint_alpha = 0.f;
     std::uint64_t fps_frames = 0; ///< Game frames when the count started
     double fps_started = 0.0;
+    std::array<char, 1024> game_input{}; ///< The launcher's game file field
+    std::string game_input_from;         ///< The path it was last filled from
 };
 
 /// The overlay registered with the renderer, created by the frontend.

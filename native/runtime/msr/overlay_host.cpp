@@ -37,6 +37,7 @@ int video_pad_any_held(void);
 void dsp_set_volume(float volume);
 void main_set_frame_rate(int fps);
 void main_exit(int code);
+void msr_launcher_action(int kind, const char* text);
 extern unsigned g_gsp_top_swaps;
 }
 
@@ -55,6 +56,7 @@ double Now() {
 }
 
 MSR::EmulatorSettings emulator, launched;   // now, and as the launcher started msr-native
+bool launcher_mode = false;                 // the program is the launcher (launcher.cpp): no game behind the menu
 std::mutex upload_lock;                     // video.c holds its queue lock around Init
 int capturing = -1;                         // the control waiting for a new key or button
 bool capture_armed = false;                 // the pad button that chose it has been released
@@ -108,12 +110,23 @@ void RefreshMods() {
     s.preload = true;   // msr-native reads every pack's file list at start and loads the images as they are used
     s.dump = false;
     s.texture_options = false;
-    s.restart_needed = NativeMods::Pending() != NativeMods::Booted();
+    s.restart_needed = !launcher_mode && NativeMods::Pending() != NativeMods::Booted();
     O().SetMods(s);
 }
 
-/// What the overlay changed, applied, and kept for the launcher where it differs from what the launcher gave.
+/// What the overlay changed, applied, and kept for the launcher where it differs from what the launcher gave. In the
+/// launcher they are only kept (they are the game's: its window stays as it is) and written whatever they are.
 void ApplyEmulator(const MSR::EmulatorSettings& e) {
+    if (launcher_mode) {
+        emulator = e;
+        MsrIni::File file(msr_settings_file());
+        file.SetBool("native", "fullscreen", e.fullscreen);
+        file.SetNumber("native", "resolution", e.resolution);
+        file.SetBool("native", "vsync", e.vsync);
+        file.SetNumber("native", "volume", e.volume);
+        if (!file.Save()) std::fprintf(stderr, "msr: could not save the display settings\n");
+        return;
+    }
     if (e.fullscreen != emulator.fullscreen) video_set_fullscreen(e.fullscreen);
     if (e.resolution != emulator.resolution) video_set_resolution(e.resolution);
     if (e.vsync != emulator.vsync) video_set_vsync(e.vsync);
@@ -187,6 +200,24 @@ void Modifiers(Uint16 mod) {
 
 } // namespace
 
+extern "C" void msr_overlay_launcher(int on) {
+    launcher_mode = on != 0;
+}
+
+/// The launcher, after the game ended: what its menu changed (settings.ini).
+extern "C" void msr_overlay_reload(void) {
+    msr_settings_load(msr_settings_file());
+    MsrIni::File file(msr_settings_file());
+    emulator.fullscreen = file.Bool("native", "fullscreen", emulator.fullscreen);
+    emulator.resolution = static_cast<int>(file.Number("native", "resolution", emulator.resolution));
+    emulator.vsync = file.Bool("native", "vsync", emulator.vsync);
+    emulator.volume = static_cast<int>(file.Number("native", "volume", emulator.volume));
+    O().SetEmulatorSettings(emulator);
+    LoadControls();
+    RefreshControls();
+    RefreshMods();
+}
+
 extern "C" void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume) {
     launched.fullscreen = fullscreen != 0;
     launched.resolution = resolution;
@@ -200,7 +231,7 @@ extern "C" void msr_overlay_start(int fullscreen, int resolution, int vsync, int
     LoadControls();
     RefreshControls();
     RefreshMods();
-    O().ShowStartupHint();
+    if (!launcher_mode) O().ShowStartupHint();
 }
 
 extern "C" void msr_overlay_vk_init(VkInstance instance, VkPhysicalDevice physical, VkDevice device, uint32_t family,
@@ -391,7 +422,19 @@ extern "C" void msr_overlay_frame(void) {
             msr_settings_save();
             main_exit(MSR_EXIT_RESTART);
             break;
+        case Kind::LauncherPlay:
+        case Kind::LauncherBuild:
+        case Kind::LauncherCancel:
+        case Kind::LauncherBrowse:
+        case Kind::LauncherGame:
+        case Kind::LauncherFolder:
+            msr_launcher_action(static_cast<int>(action.kind), action.text.c_str());
+            break;
         case Kind::Quit:
+            if (launcher_mode) {
+                msr_launcher_action(static_cast<int>(action.kind), nullptr);
+                break;
+            }
             msr_settings_save();
             main_exit(0);
             break;

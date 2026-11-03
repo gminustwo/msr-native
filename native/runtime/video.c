@@ -454,7 +454,7 @@ int video_init(int scale) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | (g_input_none ? 0 : SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK))) { fprintf(stderr, "video: SDL_Init: %s\n", SDL_GetError()); return -1; }
     static const int cw[L_COUNT] = { TOP_W, TOP_W + BOT_W, TOP_W + BOT_W / 2, TOP_W, BOT_W, 0, TOP_W }, chh[L_COUNT] = { 2 * SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, 2 * SCR_H };
     int win_w = opt_layout == L_SINGLE ? SCR_H * scale * 16 / 9 : cw[opt_layout] * scale;   /* single: 16:9 (1280x720 at 3) */
-    win = SDL_CreateWindow("Metroid: Samus Returns (native)", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, chh[opt_layout] * scale, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+    win = SDL_CreateWindow("Metroid: Samus Returns", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, chh[opt_layout] * scale, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     if (!win) { fprintf(stderr, "video: SDL_CreateWindow: %s\n", SDL_GetError()); return -1; }
     SDL_SetWindowMinimumSize(win, BOT_W, SCR_H);
     if (opt_fs) apply_fullscreen();
@@ -580,6 +580,9 @@ static void fill(uint8_t *px, int pw, int x0, int y0, int w, int h, uint32_t rgb
 }
 
 void video_set_fullscreen(int on) { opt_fs = on ? fs_last : 0; apply_fullscreen(); }
+/* the launcher (msr/launcher.cpp): its window hides while the game runs; the file dialog's owner */
+void video_show(int on) { if (!win) return; if (on) { SDL_ShowWindow(win); SDL_RaiseWindow(win); } else SDL_HideWindow(win); }
+SDL_Window *video_window(void) { return win; }
 void video_set_vsync(int on) { opt_vsync = on != 0; if (swap) recreate_swapchain(); }
 /* the 3D resolution: 1..4, or 0 to follow the window's height (240 lines each) */
 static void match_resolution(int drawable_h) {

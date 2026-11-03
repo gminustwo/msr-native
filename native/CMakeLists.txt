@@ -4,6 +4,7 @@
 # Compilers: GCC or Clang (MinGW-w64 on Windows). Needs SDL2, Vulkan headers and loader, glslc.
 cmake_minimum_required(VERSION 3.16)
 project(msr_native C CXX)
+set(MSR_NATIVE_VERSION "0.1.0")   # the launcher shows it; the native code's module.json records it
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
 if(NOT CMAKE_BUILD_TYPE)
@@ -21,6 +22,17 @@ endif()
 
 find_package(Threads REQUIRED)
 find_package(Vulkan REQUIRED)
+# SDL2 built from a source folder (static: nothing to ship), e.g. for an AppImage on a system without SDL2's headers
+set(MSR_SDL2_SOURCE "" CACHE PATH "Build SDL2 statically from this source folder instead of using the system's")
+if (MSR_SDL2_SOURCE AND NOT TARGET SDL2::SDL2)
+    set(SDL_SHARED OFF CACHE BOOL "" FORCE)
+    set(SDL_STATIC ON CACHE BOOL "" FORCE)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC_PIC ON CACHE BOOL "" FORCE)
+    add_subdirectory(${MSR_SDL2_SOURCE} ${CMAKE_CURRENT_BINARY_DIR}/sdl2 EXCLUDE_FROM_ALL)
+    add_library(SDL2::SDL2 ALIAS SDL2-static)
+endif()
 if (NOT TARGET SDL2::SDL2)   # inside the main build the system SDL2 may already be found
     find_package(SDL2 REQUIRED)
 endif()
@@ -61,6 +73,7 @@ add_executable(msr-native
   runtime/msr/textures.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/cityhash.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../src/msr/touch_nav.cpp
   runtime/msr/ini.cpp runtime/msr/mods.cpp runtime/msr/patch.cpp runtime/msr/layered_fs.cpp runtime/msr/overlay_host.cpp
+  runtime/msr/launcher.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../src/msr/overlay.cpp
   ${SHO}/pica.vert.inc ${SHO}/pica_vs.vert.inc ${SHO}/pica.frag.inc
   ${SHO}/present.vert.inc ${SHO}/present.frag.inc
@@ -69,7 +82,8 @@ add_executable(msr-native
 # Samus Returns' features share src/msr's headers with the emulator-based build (msr/compat: the types they use).
 target_include_directories(msr-native PRIVATE runtime/msr/compat runtime ${SHO} ${MSR_AOT_DIR}
                            ${CMAKE_CURRENT_SOURCE_DIR}/../src)
-target_compile_definitions(msr-native PRIVATE _FILE_OFFSET_BITS=64 MSR_AOT_RUNTIME_SHA256="${MSR_AOT_RUNTIME_SHA256}" MSR_NATIVE)
+target_compile_definitions(msr-native PRIVATE _FILE_OFFSET_BITS=64 MSR_AOT_RUNTIME_SHA256="${MSR_AOT_RUNTIME_SHA256}" MSR_NATIVE
+                           MSR_NATIVE_VERSION="${MSR_NATIVE_VERSION}")
 # Saved vertex shaders (pwr_shaders.bin) stay valid while their generator is the same: its source's hash, not the build time
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/runtime/pica_vsgen.c MSR_VSGEN_TEXT)
 string(REPLACE "\r" "" MSR_VSGEN_TEXT "${MSR_VSGEN_TEXT}")
@@ -107,6 +121,8 @@ if(WIN32)
     set(CMAKE_RC_FLAGS "${CMAKE_RC_FLAGS} --preprocessor=gcc --preprocessor-arg=-E --preprocessor-arg=-xc --preprocessor-arg=-DRC_INVOKED")
   endif()
   target_sources(msr-native PRIVATE runtime/win/pwr.rc runtime/win/hdr_win.c)
-  set_source_files_properties(runtime/win/pwr.rc PROPERTIES OBJECT_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/runtime/win/pwr.manifest)
-  target_link_libraries(msr-native PRIVATE winmm shell32 dxgi dwmapi)
+  set_source_files_properties(runtime/win/pwr.rc PROPERTIES OBJECT_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/runtime/win/pwr.manifest;${CMAKE_CURRENT_SOURCE_DIR}/runtime/win/msr-native.ico")
+  target_link_libraries(msr-native PRIVATE winmm shell32 dxgi dwmapi comdlg32)
+  # a window program: no console opens with it (the launcher logs to user/launcher.log, the game to the file it is given)
+  set_target_properties(msr-native PROPERTIES WIN32_EXECUTABLE TRUE)
 endif()

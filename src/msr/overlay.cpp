@@ -125,6 +125,7 @@ void ApplyStyle() {
     colors[ImGuiCol_SliderGrabActive] = {.5f, .85f, 1.f, 1.f};
     colors[ImGuiCol_Header] = colors[ImGuiCol_HeaderHovered] = accent_dim;
     colors[ImGuiCol_NavCursor] = {.6f, .9f, 1.f, 1.f};
+    colors[ImGuiCol_PlotHistogram] = accent;   // the launcher's build progress
 }
 
 /// A row's label, wrapped before `column` (window local) so no font runs it under the row's
@@ -292,6 +293,9 @@ Overlay::~Overlay() {
 }
 
 void Overlay::SetVisible(bool show) {
+    if (!show && launcher_active.load()) {
+        return;   // the launcher is this menu: it stays open
+    }
     visible = show;
     // Input goes back to the game only once the closing button is released (InputBridge).
     if (show) {
@@ -353,9 +357,20 @@ std::vector<OverlayAction> Overlay::TakeActions() {
     return std::exchange(actions, {});
 }
 
-void Overlay::Act(OverlayAction::Kind kind, int value) {
+void Overlay::Act(OverlayAction::Kind kind, int value, std::string text) {
     std::scoped_lock lock{mutex};
-    actions.push_back({kind, emulator, value});
+    actions.push_back({kind, emulator, value, std::move(text)});
+}
+
+void Overlay::SetLauncher(const LauncherSnapshot& snapshot) {
+    {
+        std::scoped_lock lock{mutex};
+        launcher = snapshot;
+    }
+    launcher_active = snapshot.active;
+    if (snapshot.active) {
+        visible = true;
+    }
 }
 
 void Overlay::SetControls(const ControlsSnapshot& snapshot) {
@@ -491,11 +506,14 @@ void Overlay::Draw(VkCommandBuffer command, std::uint32_t width, std::uint32_t h
 
     ImGui_ImplVulkan_NewFrame();
     ImGui::NewFrame();
-    DrawHint(scale, static_cast<float>(width), static_cast<float>(height));
+    const bool launching = launcher_active.load();   // the launcher: no game behind the menu
+    if (!launching) {
+        DrawHint(scale, static_cast<float>(width), static_cast<float>(height));
+    }
     if (!show) {
         DrawControlHints(static_cast<float>(width), static_cast<float>(height));
     }
-    if (GetPlayerSettings().show_fps) {
+    if (GetPlayerSettings().show_fps && !launching) {
         DrawFps(scale, static_cast<float>(width));
     }
     if (show) {
@@ -863,10 +881,12 @@ void Overlay::DrawMenu(float scale, bool appearing) {
     // Snapshots edited by the widgets; changes are published or queued below.
     PlayerSettings p;
     EmulatorSettings e;
+    LauncherSnapshot l;
     {
         std::scoped_lock lock{mutex};
         p = player;
         e = emulator;
+        l = launcher;
     }
     const PlayerSettings before = p;
     bool player_changed = false;
@@ -920,6 +940,9 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             }
         };
         if (tab_item("Game", 0)) {
+            if (l.active) {
+                DrawLauncher(l, label_width, default_focus);
+            }
             row("Volume");
             emulator_changed |= ImGui::SliderInt("##volume", &e.volume, 0, 100, "%d%%");
             row("Unlock amiibo galleries");
@@ -940,23 +963,30 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             }
             ImGui::Spacing();
             const ImVec2 button{-FLT_MIN, 0.f};
-            if (ImGui::Button("Resume", button)) {
-                SetVisible(false);
-            }
-            default_focus();
-            ImGui::BeginDisabled(!e.quick_saves);
-            if (ImGui::Button("Quick save", button)) {
-                Act(OverlayAction::Kind::QuickSave);
-                SetVisible(false);
-            }
-            if (ImGui::Button("Quick load", button)) {
-                Act(OverlayAction::Kind::QuickLoad);
-                SetVisible(false);
-            }
-            ImGui::EndDisabled();
-            if (ImGui::Button("Restart", button)) {
-                Act(OverlayAction::Kind::Restart);
-                SetVisible(false);
+            if (l.active) {
+                if (ImGui::Button("Open the user folder", button)) {
+                    Act(OverlayAction::Kind::LauncherFolder);
+                }
+                Note(("Saves, settings, game mods and texture packs: " + l.folder).c_str());
+            } else {
+                if (ImGui::Button("Resume", button)) {
+                    SetVisible(false);
+                }
+                default_focus();
+                ImGui::BeginDisabled(!e.quick_saves);
+                if (ImGui::Button("Quick save", button)) {
+                    Act(OverlayAction::Kind::QuickSave);
+                    SetVisible(false);
+                }
+                if (ImGui::Button("Quick load", button)) {
+                    Act(OverlayAction::Kind::QuickLoad);
+                    SetVisible(false);
+                }
+                ImGui::EndDisabled();
+                if (ImGui::Button("Restart", button)) {
+                    Act(OverlayAction::Kind::Restart);
+                    SetVisible(false);
+                }
             }
             if (ImGui::Button("Quit", button)) {
                 Act(OverlayAction::Kind::Quit);
@@ -1088,7 +1118,8 @@ void Overlay::DrawMenu(float scale, bool appearing) {
     requested_tab = -1;
 
     ImGui::Separator();
-    const std::string help = ButtonGlyphs::Keys("{Choose} choose   {Back} back   {Tabs} tabs   {Close} close");
+    const std::string help = ButtonGlyphs::Keys(l.active ? "{Choose} choose   {Tabs} tabs"
+                                                         : "{Choose} choose   {Back} back   {Tabs} tabs   {Close} close");
     ImGui::TextDisabled("%s", help.c_str());
     ImGui::End();
 
@@ -1107,12 +1138,105 @@ void Overlay::DrawMenu(float scale, bool appearing) {
         EmulatorChanged();
     }
 
+    // The focus shown from the start, so Enter, Space or the pad's button works on the focused button at once
+    // (ImGui hides it until a direction is pressed, and ignores activation while it is hidden).
+    if (appearing) {
+        ImGui::SetNavCursorVisible(true);
+    }
+
     // Back out of the menu with B (the bottom face button) or Escape when nothing is being edited.
     if (!ImGui::IsAnyItemActive() && (ImGui::IsKeyPressed(ImGuiKey_GamepadFaceDown, false) ||
                                       ImGui::IsKeyPressed(ImGuiKey_Escape, false) ||
                                       ImGui::IsKeyPressed(ImGuiKey_GamepadStart, false))) {
         SetVisible(false);
     }
+}
+
+void Overlay::DrawLauncher(const LauncherSnapshot& l, float label_width,
+                           const std::function<void()>& default_focus) {
+    using Code = LauncherSnapshot::Code;
+    const auto& style = ImGui::GetStyle();
+    const ImVec4 good{.53f, .89f, .6f, 1.f}, bad{1.f, .55f, .45f, 1.f};
+    // Play: the first and largest button, focused when it can start the game
+    ImGui::BeginDisabled(!l.can_play);
+    ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
+    if (ImGui::Button("Play", {-FLT_MIN, ImGui::GetFrameHeight() * 1.7f})) {
+        Act(OverlayAction::Kind::LauncherPlay);
+    }
+    ImGui::PopStyleColor();
+    ImGui::EndDisabled();
+    if (l.can_play) {
+        default_focus();
+    }
+    ImGui::Spacing();
+
+    // The game file: typed or chosen with the file dialog
+    if (l.game != game_input_from) {
+        game_input_from = l.game;
+        std::snprintf(game_input.data(), game_input.size(), "%s", l.game.c_str());
+    }
+    Label("Game file", label_width);
+    const float browse = l.can_browse ? ImGui::CalcTextSize("Browse...").x + style.FramePadding.x * 2.f : 0.f;
+    ImGui::SetNextItemWidth(l.can_browse ? -(browse + style.ItemSpacing.x) : -FLT_MIN);
+    ImGui::InputTextWithHint("##game", "Samus Returns (USA), a decrypted .3ds, .cci or .cxi", game_input.data(),
+                             game_input.size());
+    if (ImGui::IsItemDeactivatedAfterEdit()) {
+        Act(OverlayAction::Kind::LauncherGame, 0, game_input.data());
+    }
+    if (!l.can_play && l.game.empty()) {
+        default_focus();
+    }
+    if (l.can_browse) {
+        ImGui::SameLine();
+        if (ImGui::Button("Browse...")) {
+            Act(OverlayAction::Kind::LauncherBrowse);
+        }
+    }
+    if (!l.game_note.empty()) {
+        ImGui::SetCursorPosX(label_width);
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextColored(bad, "%s", l.game_note.c_str());
+        ImGui::PopTextWrapPos();
+    }
+
+    // The native code: the game's code recompiled from the game file, built once
+    Label("Native code", label_width);
+    static constexpr const char* states[] = {"Not built yet", "Ready", "Built by another version: rebuild it",
+                                             "Building...", "The build failed"};
+    const ImVec4 color = l.code == Code::Ready ? good : l.code == Code::Building ? ImGui::GetStyleColorVec4(ImGuiCol_Text) : bad;
+    ImGui::PushTextWrapPos(0.f);
+    ImGui::TextColored(color, "%s", states[static_cast<int>(l.code)]);
+    ImGui::PopTextWrapPos();
+    ImGui::SetCursorPosX(label_width);
+    ImGui::BeginGroup();
+    const float width = ImGui::GetContentRegionAvail().x;
+    if (l.code == Code::Building) {
+        if (l.progress >= 0.f) {
+            ImGui::ProgressBar(l.progress, {width, 0.f});
+        }
+        if (ImGui::Button("Cancel", {width, 0.f})) {
+            Act(OverlayAction::Kind::LauncherCancel);
+        }
+    } else {
+        ImGui::BeginDisabled(l.game.empty() || !l.game_note.empty());
+        if (ImGui::Button(l.code == Code::Missing ? "Build the native code" : "Rebuild the native code", {width, 0.f})) {
+            Act(OverlayAction::Kind::LauncherBuild);
+        }
+        ImGui::EndDisabled();
+        if (!l.can_play && !l.game.empty() && l.game_note.empty()) {
+            default_focus();
+        }
+    }
+    if (!l.code_note.empty()) {
+        ImGui::PushTextWrapPos(0.f);
+        Note(l.code_note.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    ImGui::EndGroup();
+    ImGui::Spacing();
+    Note((l.version + ": the game's code runs as native code built from your own dump, on a small "
+          "3DS runtime of its own. Nothing of the game comes with this program.").c_str());
+    ImGui::Separator();
 }
 
 Overlay& GetOverlay() {

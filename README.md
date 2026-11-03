@@ -10,6 +10,22 @@ the randomizer, save states, cheats, mouse aiming and per-device button icons. `
 **No game code or data is in this repository.** The dump, the library made from it, saves and texture packs live in
 `run/` and `test/`, which git ignores.
 
+## The launcher
+
+Started on its own (a double-click, no options), msr-native is its own launcher: the settings menu, with Play, the
+game file and the native code on its Game tab (`native/runtime/msr/launcher.cpp`, drawn by `src/msr/overlay.cpp`).
+
+- **Game file**: the player's dump, typed in or chosen with the system's file dialog (`user/msr/game-path.txt`).
+- **Native code**: Build runs the recompiler shipped beside the program (`recomp/`) on the dump. On the first build it
+  downloads the build tools (Python on Windows, Zig, capstone) with curl, pinned by SHA-256, into
+  `user/msr/recomp-kit/`. Progress shows in the menu; the log is `user/msr/recomp-build.log`.
+- **Play**: the program again with `--play` and the display settings (`settings.ini [native]`). The launcher hides
+  until the game ends and starts it again when the game's Restart asks.
+
+The user folder is `user/` beside the program (Windows; Linux when one is there, also beside the AppImage), else
+`%LOCALAPPDATA%\msr-native` or `~/.local/share/msr-native`. `MSR_NATIVE_HOME` overrides it. The launcher logs to
+`user/launcher.log`, the game to `user/msr-native.log`.
+
 ## Layout
 
 | Folder | What |
@@ -19,7 +35,8 @@ the randomizer, save states, cheats, mouse aiming and per-device button icons. `
 | `src/common/`, `src/core/arm/` | the few helpers those need, the recompiled module's interface (`msr_aot/aot_runtime.h`) and the ARM11 timing table |
 | `externals/msr-imgui/` | Dear ImGui (MIT), unmodified |
 | `tools/msr/recomp/` | the recompiler: your dump in, `msr_aot.dll` out |
-| `tools/dev/shot.ps1` | test driver: starts the game from `test/` in the background, sends keys and mouse input, takes screenshots |
+| `tools/dev/shot.ps1` | test driver: starts the game (or, with `-GameArgs ''`, the launcher) from `test/` in the background, sends keys and mouse input, takes screenshots |
+| `tools/package/` | the release packages: `windows.py` (zip), `appimage.sh` (Linux), the players' `README.txt`, the icon |
 | `run/` | your play folder (not in git) |
 | `test/` | the test folder (not in git) |
 
@@ -35,6 +52,18 @@ cmake --build build -j 8
 ```
 
 Keep builds at `-j 8` or less on this PC: the i9-14900K resets under all-core loads until its BIOS is updated.
+
+## Releases
+
+```sh
+python tools/package/windows.py                  # dist/msr-native-<version>-windows-x64.zip
+# Linux, from PowerShell (WSL Ubuntu; SDL2 built from the emulator tree's source, as the system has no SDL2 headers):
+wsl -d Ubuntu --cd /mnt/d/Games/pcports/3ds_ports/msr-native -- env MSR_JOBS=8 bash tools/package/appimage.sh \
+    /home/lou/msr-native-build /home/lou/samus-build/src/externals/sdl2/SDL
+```
+
+The version is `MSR_NATIVE_VERSION` in `native/CMakeLists.txt`. Each package holds the program, the recompiler
+(`recomp/`), `tools/package/README.txt` and the licences.
 
 ## The game's code
 

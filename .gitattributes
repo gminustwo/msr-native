@@ -1,3 +1,4 @@
 externals/* linguist-vendored
 *.h linguist-language=cpp
 *.ps1 text eol=crlf
+*.sh text eol=lf
