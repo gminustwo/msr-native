@@ -218,6 +218,27 @@ extern "C" void msr_overlay_reload(void) {
     RefreshMods();
 }
 
+/// A Steam Deck (LCD: Jupiter, OLED: Galileo), by its firmware's names: the Display tab offers its preset
+static bool SteamDeck() {
+#ifdef __linux__
+    const auto read = [](const char* path) {
+        std::string s;
+        if (FILE* f = std::fopen(path, "rb")) {
+            char buf[64];
+            const std::size_t n = std::fread(buf, 1, sizeof buf, f);
+            std::fclose(f);
+            s.assign(buf, n);
+        }
+        while (!s.empty() && (s.back() == '\n' || s.back() == '\r' || s.back() == ' ')) s.pop_back();
+        return s;
+    };
+    const std::string vendor = read("/sys/devices/virtual/dmi/id/board_vendor"), product = read("/sys/devices/virtual/dmi/id/product_name");
+    return vendor == "Valve" && (product == "Jupiter" || product == "Galileo");
+#else
+    return false;
+#endif
+}
+
 extern "C" void msr_overlay_start(int fullscreen, int resolution, int vsync, int volume) {
     launched.fullscreen = fullscreen != 0;
     launched.resolution = resolution;
@@ -226,6 +247,7 @@ extern "C" void msr_overlay_start(int fullscreen, int resolution, int vsync, int
     launched.max_resolution = 10;
     launched.quick_saves = true;
     launched.bloom_option = true;
+    launched.deck_preset = SteamDeck();
     emulator = launched;
     O().SetEmulatorSettings(emulator);
     LoadControls();

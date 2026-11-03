@@ -88,6 +88,9 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   decodes it (bottom-up rows, colour formats as stored, the others as RGBA8, Azahar's ETC1); `use_new_hash` in a
   pack.json hashes the guest bytes. PNGs (libpng; without it packs are left out) load on worker threads, flipped as
   `flip_png_files` says, and `pica_vk.c` gives each replacement mipmaps down past the game's own levels by its scale.
+  The workers also work out the legacy hash (from a copy of the texture; the game's texture shows meanwhile) and
+  prepare each replacement's upload: its staging buffer and image (`pica_vk.c` stage_make), so the GX thread only
+  records the copy and the mipmaps. `PWR_TEXPACK_SYNC=1` does both on the GX thread, as before (A/B).
 - Game mods (`msr/mods.cpp`, `msr/layered_fs.cpp`): the launcher's Mods list (`<user>/mods/game`, `settings.ini`
   `[game_mods]`, read and written as QSettings does by `msr/ini.cpp`) and the Textures list. The game parses its
   RomFS image itself, so with mods the image is rebuilt as the emulator's LayeredFS does: each mod's `romfs/` replaces
@@ -182,6 +185,15 @@ every batch.
     Linux main() now ends with `_exit` after the shutdown.
   - "Match window" (`--resolution=0`, which the launcher had turned into 2x as the option refused 0) follows the top
     screen as shown, the nearest 240-line multiple: 3x on the Deck's 1280x800 (it was 4x by the window's height).
+  - Hitches as new textures came in (walking into new rooms with the 4x pack): the GX thread decoded each new texture
+    per texel through `pica_texel` (39 ms for a 1024x1024 ETC1 texture and its mipmaps), worked out its legacy hash for
+    the pack (20 ms) and copied the replacement into a new staging buffer and image (up to 17 ms + 1-5 ms). Now
+    `pica_decode_level` decodes by tiles and ETC1 blocks, shared with the worker pool (ETC1 1024x1024: ~3 ms; the same
+    texels as `pica_texel`, checked on every format), and the pack's work is the workers' (texture packs, above). A
+    walk through new rooms at 3x: 68 frames over 20 ms before, 2 now (60 FPS but for those).
+  - The settings' Display tab on a Steam Deck (its firmware's names, `overlay_host.cpp` SteamDeck) starts with a preset:
+    3x, 60 FPS and V-Sync, which held 60 there with the 4x pack (~100 FPS without a limit); it suggests the Deck's
+    refresh rate at 60 Hz, as 60 FPS on the OLED's 90 Hz shows frames for one refresh or two in turn.
 
 **From the launcher:** once the native code is built, the Game tab's "Without the emulator (experimental)" makes Play
 start `msr-native` (beside the exe) with `--layout=single --scale=3 --resolution=<the launcher's> --filter=fsr`, plus

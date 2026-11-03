@@ -9,6 +9,7 @@
 #include <time.h>
 #include <string.h>
 #include <stdlib.h>
+#include <stddef.h>
 #include <pthread.h>
 
 #include "state.h"
@@ -403,6 +404,110 @@ uint32_t pica_texel(uint32_t addr, int fmt, int w, int x, int y) {
     default: return 0xffff00ffu;
     }
     return (uint32_t)r | (uint32_t)g << 8 | (uint32_t)b << 16 | (uint32_t)a << 24;
+}
+
+/* One ETC1 block (8 bytes, or 16 with ETC1A4's alpha first), all 16 texels as etc_texel gives them, c[x * 4 + y]: what
+   depends on the block alone (its words, base colours, tables) once instead of per texel */
+static void etc_block(const uint8_t *blk, int alpha, uint32_t c[16]) {
+    uint32_t w0, w1; memcpy(&w0, blk + (alpha ? 8 : 0), 4); memcpy(&w1, blk + (alpha ? 12 : 4), 4);
+    uint32_t hi = w1, lo = w0;
+    int flip = hi & 1, diff = (hi >> 1) & 1, base[2][3], tbl[2];
+    for (int sub = 0; sub < 2; sub++) {
+        int r, g, b;
+        if (diff) {
+            int r1 = hi >> 27 & 31, g1 = hi >> 19 & 31, b1 = hi >> 11 & 31;
+            if (sub) { r1 += ((int)(hi >> 24 & 7) ^ 4) - 4; g1 += ((int)(hi >> 16 & 7) ^ 4) - 4; b1 += ((int)(hi >> 8 & 7) ^ 4) - 4; }
+            r = (r1 << 3) | (r1 >> 2 & 7); g = (g1 << 3) | (g1 >> 2 & 7); b = (b1 << 3) | (b1 >> 2 & 7);
+        } else {
+            r = (int)(sub ? hi >> 24 & 15 : hi >> 28 & 15) * 17; g = (int)(sub ? hi >> 16 & 15 : hi >> 20 & 15) * 17; b = (int)(sub ? hi >> 8 & 15 : hi >> 12 & 15) * 17;
+        }
+        base[sub][0] = r; base[sub][1] = g; base[sub][2] = b; tbl[sub] = (int)(sub ? hi >> 2 & 7 : hi >> 5 & 7);
+    }
+    uint32_t pal[2][4];   /* each half's four colours (modifier and clamp done), alpha 255 */
+    for (int sub = 0; sub < 2; sub++) for (int idx = 0; idx < 4; idx++) {
+        const int *m = etc_mod[tbl[sub]];
+        int d = idx == 0 ? m[0] : idx == 1 ? m[1] : idx == 2 ? -m[0] : -m[1];
+        int r = base[sub][0] + d, g = base[sub][1] + d, b = base[sub][2] + d;
+        r = r < 0 ? 0 : r > 255 ? 255 : r; g = g < 0 ? 0 : g > 255 ? 255 : g; b = b < 0 ? 0 : b > 255 ? 255 : b;
+        pal[sub][idx] = (uint32_t)r | (uint32_t)g << 8 | (uint32_t)b << 16 | 0xff000000u;
+    }
+    uint64_t am = 0;
+    if (alpha) { uint32_t a0, a1; memcpy(&a0, blk, 4); memcpy(&a1, blk + 4, 4); am = (uint64_t)a0 | (uint64_t)a1 << 32; }
+    for (int k = 0; k < 16; k++) {   /* k = x * 4 + y */
+        int x = k >> 2, y = k & 3, sub = flip ? (y >= 2) : (x >= 2);
+        uint32_t v = pal[sub][((lo >> k) & 1) | (((lo >> (k + 16)) & 1) << 1)];
+        if (alpha) v = (v & 0xffffffu) | (uint32_t)((am >> (k * 4)) & 15) * 17u << 24;
+        c[k] = v;
+    }
+}
+
+/* Tile rows ty0, ty0 + step, ... of a texture level, as pica_texel gives them, into out (w * h texels; row j is memory
+   row h - 1 - j, as pica_vk.c uploads it): by 8x8 tiles in memory order, ETC1 by 4x4 blocks (w and h multiples of 8) */
+static uint8_t tx_of[64], ty_of[64], c5[32], c6[64];   /* Morton index in a tile -> (x, y); pica_texel's 5- and 6-bit expansions */
+static void decode_tile_rows(const uint8_t *src, int fmt, uint32_t w, uint32_t h, uint32_t *out, uint32_t ty0, uint32_t step) {
+    const uint32_t tw = w / 8, th = h / 8;
+    if (fmt == 12 || fmt == 13) {
+        const int bs = fmt == 13 ? 16 : 8; uint32_t c[16];
+        for (uint32_t ty = ty0; ty < th; ty += step) for (uint32_t tx = 0; tx < tw; tx++) {
+            const uint8_t *tile = src + ((size_t)ty * tw + tx) * 4 * (size_t)bs;
+            for (int sub = 0; sub < 4; sub++) {
+                etc_block(tile + sub * bs, fmt == 13, c);
+                uint32_t bx = tx * 8 + (uint32_t)(sub & 1) * 4, by = ty * 8 + (uint32_t)(sub >> 1) * 4;
+                for (uint32_t y = 0; y < 4; y++) {
+                    uint32_t *row = out + (size_t)(h - 1 - (by + y)) * w + bx;
+                    row[0] = c[0 + y]; row[1] = c[4 + y]; row[2] = c[8 + y]; row[3] = c[12 + y];
+                }
+            }
+        }
+        return;
+    }
+    const uint32_t bpp = (uint32_t)pica_tex_bpp[fmt];
+    for (uint32_t ty = ty0; ty < th; ty += step) for (uint32_t tx = 0; tx < tw; tx++) {
+        const uint32_t t0 = (ty * tw + tx) * 64;   /* the tile's first texel index */
+        uint32_t *base = out + (size_t)(h - 1 - ty * 8) * w + tx * 8;   /* (x, y) of the tile -> base[x - y * w] */
+        for (uint32_t i = 0; i < 64; i++) {
+            const uint32_t idx = t0 + i; const uint8_t *p = src + (size_t)idx * bpp / 8;
+            uint32_t v, r, a, o;
+            switch (fmt) {
+            case 0: o = (uint32_t)p[3] | p[2] << 8 | p[1] << 16 | (uint32_t)p[0] << 24; break;
+            case 1: o = (uint32_t)p[2] | p[1] << 8 | p[0] << 16 | 0xff000000u; break;
+            case 2: v = (uint32_t)p[0] | p[1] << 8; o = c5[v >> 11] | c5[v >> 6 & 31] << 8 | c5[v >> 1 & 31] << 16 | (v & 1) * 255u << 24; break;
+            case 3: v = (uint32_t)p[0] | p[1] << 8; o = c5[v >> 11] | c6[v >> 5 & 63] << 8 | c5[v & 31] << 16 | 0xff000000u; break;
+            case 4: v = (uint32_t)p[0] | p[1] << 8; o = (v >> 12) * 17 | (v >> 8 & 15) * 17 << 8 | (v >> 4 & 15) * 17 << 16 | (v & 15) * 17 << 24; break;
+            case 5: v = (uint32_t)p[0] | p[1] << 8; r = v >> 8; o = r | r << 8 | r << 16 | (v & 0xff) << 24; break;
+            case 6: v = (uint32_t)p[0] | p[1] << 8; o = (v >> 8) | (v & 0xff) << 8 | 0xff000000u; break;
+            case 7: r = p[0]; o = r | r << 8 | r << 16 | 0xff000000u; break;
+            case 8: o = (uint32_t)p[0] << 24; break;
+            case 9: v = p[0]; r = (v >> 4) * 17; a = (v & 15) * 17; o = r | r << 8 | r << 16 | a << 24; break;
+            case 10: v = p[0]; r = ((idx & 1) ? v >> 4 : v & 15) * 17; o = r | r << 8 | r << 16 | 0xff000000u; break;
+            default: v = p[0]; a = ((idx & 1) ? v >> 4 : v & 15) * 17; o = a << 24; break;   /* 11: A4 */
+            }
+            base[(ptrdiff_t)tx_of[i] - (ptrdiff_t)ty_of[i] * (ptrdiff_t)w] = o;
+        }
+    }
+}
+static void pool_run(void (*job)(int id, int n));
+static struct { const uint8_t *src; int fmt; uint32_t w, h; uint32_t *out; } dec;   /* the GX thread's decode, for the pool */
+static void decode_job(int id, int n) { decode_tile_rows(dec.src, dec.fmt, dec.w, dec.h, dec.out, (uint32_t)id, (uint32_t)n); }
+/* A whole texture level as pica_texel gives it, into out (w * h texels; row j is memory row h - 1 - j). Per texel
+   through pica_texel, a 1024x1024 ETC1 texture with its mipmaps took 39 ms of the GX thread on a Steam Deck the first
+   time it was drawn (2026-11-03); by blocks ~5 ms, and levels from 128x128 up are shared with the worker pool (its
+   threads are idle while the GPU renders). GX thread only. */
+void pica_decode_level(uint32_t addr, int fmt, uint32_t w, uint32_t h, uint32_t *out) {
+    if (w < 8 || h < 8 || (w & 7) || (h & 7) || fmt < 0 || fmt > 13) {   /* not whole tiles: texel by texel */
+        for (uint32_t j = 0; j < h; j++) for (uint32_t x = 0; x < w; x++) out[(size_t)j * w + x] = pica_texel(addr, fmt, (int)w, (int)x, (int)(h - 1 - j));
+        return;
+    }
+    static int ready;
+    if (!ready) {
+        for (int y = 0; y < 8; y++) for (int x = 0; x < 8; x++) { tx_of[mx[x] + my[y]] = (uint8_t)x; ty_of[mx[x] + my[y]] = (uint8_t)y; }
+        for (int i = 0; i < 32; i++) c5[i] = (uint8_t)(i * 255 / 31);
+        for (int i = 0; i < 64; i++) c6[i] = (uint8_t)(i * 255 / 63);
+        ready = 1;
+    }
+    if (w * h < 128 * 128) { decode_tile_rows(g_mem + addr, fmt, w, h, out, 0, 1); return; }
+    dec.src = g_mem + addr; dec.fmt = fmt; dec.w = w; dec.h = h; dec.out = out;
+    pool_run(decode_job);
 }
 
 typedef struct { float r, g, b, a; } C4;

@@ -123,12 +123,14 @@ static int img_create(Img *im, uint32_t w, uint32_t h, VkFormat fmt, VkImageUsag
    frame is about 10 batches; with six, a GPU running behind for a moment held the GX worker up to 4 ms, a frame missed at
    144 FPS); a set is used again once its last batch has finished (set_next). The rings above are the current set's. */
 #define NSETS 12
+#define MAX_SBUF 64
 typedef struct {
     VkCommandBuffer cb[MAX_PARTS][2]; VkFence fence; int in_flight;
     VkQueryPool qp;   /* the batch's GPU time (start, end), read when the set comes round again */
     Ring rings[8];
     Img dead[512]; int ndead;   /* images let go while it was current: destroyed once its next batch has finished */
     VkBuffer dbuf[8]; VkDeviceMemory dmem[8]; int ndbuf;   /* one-off upload buffers (up_alloc), likewise */
+    VkBuffer sbuf[MAX_SBUF]; VkDeviceMemory smem[MAX_SBUF]; int nsbuf;   /* texture packs' staging buffers (stage_make), likewise */
 } BatchSet;
 static BatchSet sets[NSETS]; static int cur_set;
 static void img_destroy(Img *im) { vkDestroyImageView(dev, im->view, NULL); vkDestroyImage(dev, im->img, NULL); vkFreeMemory(dev, im->mem, NULL); }
@@ -143,6 +145,8 @@ static void set_free_dead(BatchSet *b) {
     b->ndead = 0;
     for (int i = 0; i < b->ndbuf; i++) { vkDestroyBuffer(dev, b->dbuf[i], NULL); vkFreeMemory(dev, b->dmem[i], NULL); }
     b->ndbuf = 0;
+    for (int i = 0; i < b->nsbuf; i++) { vkDestroyBuffer(dev, b->sbuf[i], NULL); vkFreeMemory(dev, b->smem[i], NULL); }
+    b->nsbuf = 0;
 }
 
 /* PWR_GX_STATS: where a command list's time goes (main.c prints it with the 2 s stats) */
@@ -505,7 +509,7 @@ static void set_next(void) {
 
 /* ---------------- textures ---------------- */
 typedef struct { uint32_t addr, w, h; int fmt, levels; Img im; uint64_t hash; uint32_t checked_list, used_batch, last_batch;
-                 uint64_t rep_key; Img rep; int rep_extra;
+                 uint64_t rep_key; Img rep; int rep_extra; int find_pending;
                  int glyph_sheet; unsigned glyph_ver; } Tex;   /* glyph_sheet: one of the game's face-button icon sheets (msr/glyphs.cpp) */   /* rep: a texture pack's replacement (msr/textures.cpp), rep_extra
                                                                           more mip levels than the game's (its scale, as a power of two) */
 static int tex_lod_extra[3];   /* per unit, for sampler_for: the replacement's extra levels */
@@ -524,11 +528,12 @@ static int tex_upload_(Tex *t) {
     VkDeviceSize off = ring_alloc(&upbuf, total, 16);
     if (off == UINT64_MAX) return -1;
     VkDeviceSize boff = off; uint32_t maddr = t->addr;
+    static uint32_t *dec; static size_t cap_dec;   /* decoded in cached memory, then one copy into the (write-combined) ring */
     for (int l = 0; l < t->levels; l++) {
         uint32_t lw = t->w >> l, lh = t->h >> l;
-        uint32_t *d = (uint32_t *)(upbuf.ptr + boff);
-        for (uint32_t j = 0; j < lh; j++) for (uint32_t x = 0; x < lw; x++)   /* image row j = texture coordinate t; memory rows run top-down */
-            d[(size_t)j * lw + x] = pica_texel(maddr, t->fmt, (int)lw, (int)x, (int)(lh - 1 - j));
+        if (cap_dec < (size_t)lw * lh) { cap_dec = (size_t)lw * lh; free(dec); dec = malloc(cap_dec * 4); if (!dec) { cap_dec = 0; return -1; } }
+        uint32_t *d = dec;
+        pica_decode_level(maddr, t->fmt, lw, lh, d);   /* image row j = texture coordinate t; memory rows run top-down */
         if (l == 0 && t->glyph_sheet) msr_glyph_patch(t->glyph_sheet, (uint8_t *)d, lw, lh);   /* the device's face-button icons */
         if (l == 0) {   /* PWR_VK_DUMPTEX=<hex va>[,<hex va>] or "all": write each upload of that texture (level 0) to tex_<va>_<n>.pam (RGBA, top row = t 1) */
             static char *dl = (char *)1; if (dl == (char *)1) dl = getenv("PWR_VK_DUMPTEX");
@@ -544,6 +549,7 @@ static int tex_upload_(Tex *t) {
                 }
             }
         }
+        memcpy(upbuf.ptr + boff, d, (size_t)lw * lh * 4);
         VkBufferImageCopy cp = { .bufferOffset = boff, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, (uint32_t)l, 0, 1 }, .imageExtent = { lw, lh, 1 } };
         vkCmdCopyBufferToImage(cb_up, upbuf.buf, t->im.img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
         boff += (VkDeviceSize)lw * lh * 4; maddr += tex_level_size(t, l);
@@ -719,26 +725,84 @@ static VkImageView alias_view(uint32_t addr, uint32_t w, uint32_t h, int fmt, in
     return VK_NULL_HANDLE;
 }
 
+/* A texture pack's replacement prepared on a pack worker (msr/textures.cpp), so the GX thread only records its copy:
+   its pixels in a staging buffer of its own and its image with the whole mip chain (this cache's view takes the levels
+   it needs). On a Steam Deck the GX thread had spent up to 17 ms copying a 4096x4096 PNG into a new buffer and 1-5 ms
+   creating its image (2026-11-03). Worker threads: device functions on objects of their own only. */
+typedef struct { VkBuffer buf; VkDeviceMemory bmem; VkImage img; VkDeviceMemory imem; uint32_t levels; } Staged;
+static void stage_drop(void *p) {
+    Staged *st = p; if (!st) return;
+    if (st->img) vkDestroyImage(dev, st->img, NULL);
+    if (st->imem) vkFreeMemory(dev, st->imem, NULL);
+    if (st->buf) vkDestroyBuffer(dev, st->buf, NULL);
+    if (st->bmem) vkFreeMemory(dev, st->bmem, NULL);
+    free(st);
+}
+static void *stage_make(const uint8_t *rgba, uint32_t w, uint32_t h) {
+    Staged *st = calloc(1, sizeof *st);
+    if (!st || !w || !h) { free(st); return NULL; }
+    st->levels = 1; while (st->levels < 16 && (w >> st->levels) >= 1 && (h >> st->levels) >= 1) st->levels++;   /* as tex_replace's at most */
+    VkDeviceSize n = (VkDeviceSize)w * h * 4; uint8_t *ptr;
+    VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = n, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
+    if (vkCreateBuffer(dev, &bi, NULL, &st->buf)) goto fail;
+    VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev, st->buf, &mr);
+    VkMemoryAllocateInfo ai = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
+        .memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) };
+    if (vkAllocateMemory(dev, &ai, NULL, &st->bmem) || vkBindBufferMemory(dev, st->buf, st->bmem, 0) || vkMapMemory(dev, st->bmem, 0, n, 0, (void **)&ptr)) goto fail;
+    memcpy(ptr, rgba, (size_t)n);
+    vkUnmapMemory(dev, st->bmem);
+    VkImageCreateInfo ci = { .sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = VK_IMAGE_TYPE_2D, .format = VK_FORMAT_R8G8B8A8_UNORM,
+        .extent = { w, h, 1 }, .mipLevels = st->levels, .arrayLayers = 1, .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
+        .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, .initialLayout = VK_IMAGE_LAYOUT_UNDEFINED };
+    if (vkCreateImage(dev, &ci, NULL, &st->img)) goto fail;
+    vkGetImageMemoryRequirements(dev, st->img, &mr);
+    VkMemoryAllocateInfo ii = { .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
+        .memoryTypeIndex = mem_type(mr.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) };
+    if (vkAllocateMemory(dev, &ii, NULL, &st->imem) || vkBindImageMemory(dev, st->img, st->imem, 0)) goto fail;
+    return st;
+fail:
+    stage_drop(st);
+    return NULL;
+}
+
 /* A texture pack's replacement, once its PNG has loaded (msr/textures.cpp): its own image, level 0 from the PNG
-   (rows already in this cache's order) and mipmaps generated down past the game's own levels, by its scale. Through
-   up_alloc: a pack's big textures (the interface atlas at 4096x2048 is 32 MB, some 4096x4096) don't fit the upload
-   ring and get a buffer of their own (through the ring alone they never loaded: the game's own texture showed) */
+   (rows already in this cache's order) and mipmaps generated down past the game's own levels, by its scale. Prepared by
+   a pack worker (above) when it could be; else through up_alloc: a pack's big textures (the interface atlas at
+   4096x2048 is 32 MB, some 4096x4096) don't fit the upload ring and get a buffer of their own (through the ring alone
+   they never loaded: the game's own texture showed) */
 static void tex_replace(Tex *t) {
-    const uint8_t *px; uint32_t rw, rh;
-    int r = msr_texture_pixels(t->rep_key, &px, &rw, &rh);
+    const uint8_t *px; uint32_t rw, rh; void *staged = NULL; int prepared = 0;
+    BatchSet *bset = &sets[cur_set];
+    if (bset->nsbuf == MAX_SBUF) return;   /* this batch has taken enough of them: the next batch */
+    /* the face-button icon sheets get the device's icons drawn into their pixels: uploaded here */
+    int r = msr_texture_take(t->rep_key, !t->glyph_sheet, &staged, &px, &rw, &rh);
     if (r < 0) { t->rep_key = 0; return; }
-    if (r == 0 || !rw || !rh) return;
+    if (r == 0 || !rw || !rh) { stage_drop(staged); return; }
     int extra = 0; while (extra < 6 && (t->w << (extra + 1)) <= rw && (t->h << (extra + 1)) <= rh) extra++;
     uint32_t levels = 1; while ((int)levels < t->levels + extra && (rw >> levels) >= 1 && (rh >> levels) >= 1) levels++;
-    VkDeviceSize n = (VkDeviceSize)rw * rh * 4, off; VkBuffer ub;
-    uint8_t *dst = up_alloc(n, &ub, &off);
-    if (!dst) return;   /* the ring is full (or this batch's own buffers are used up): the next batch */
-    if (img_create_mip(&t->rep, rw, rh, levels, VK_FORMAT_R8G8B8A8_UNORM,
-                       VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) {
-        memset(&t->rep, 0, sizeof t->rep); t->rep_key = 0; return;
+    VkBuffer ub; VkDeviceSize off = 0;
+    if (staged) {
+        Staged *st = staged; prepared = 1;
+        if (levels > st->levels) levels = st->levels;
+        VkImageViewCreateInfo vi = { .sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, .image = st->img, .viewType = VK_IMAGE_VIEW_TYPE_2D,
+            .format = VK_FORMAT_R8G8B8A8_UNORM, .subresourceRange = { VK_IMAGE_ASPECT_COLOR_BIT, 0, levels, 0, 1 } };
+        VkImageView view;
+        if (vkCreateImageView(dev, &vi, NULL, &view)) { stage_drop(st); t->rep_key = 0; return; }
+        t->rep = (Img){ st->img, st->imem, view };
+        bset->sbuf[bset->nsbuf] = st->buf; bset->smem[bset->nsbuf] = st->bmem; bset->nsbuf++;   /* freed after this batch */
+        ub = st->buf;
+        free(st);
+    } else {
+        VkDeviceSize n = (VkDeviceSize)rw * rh * 4;
+        uint8_t *dst = up_alloc(n, &ub, &off);
+        if (!dst) return;   /* the ring is full (or this batch's own buffers are used up): the next batch */
+        if (img_create_mip(&t->rep, rw, rh, levels, VK_FORMAT_R8G8B8A8_UNORM,
+                           VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT, VK_IMAGE_ASPECT_COLOR_BIT)) {
+            memset(&t->rep, 0, sizeof t->rep); t->rep_key = 0; return;
+        }
+        memcpy(dst, px, (size_t)n);
+        if (t->glyph_sheet) msr_glyph_patch(t->glyph_sheet, dst, rw, rh);   /* the device's face-button icons, at the pack's size */
     }
-    memcpy(dst, px, (size_t)n);
-    if (t->glyph_sheet) msr_glyph_patch(t->glyph_sheet, dst, rw, rh);   /* the device's face-button icons, at the pack's size */
     msr_texture_done(t->rep_key);
     to_general(cb_up, t->rep.img, VK_IMAGE_ASPECT_COLOR_BIT);
     VkBufferImageCopy cp = { .bufferOffset = off, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { rw, rh, 1 } };
@@ -753,7 +817,8 @@ static void tex_replace(Tex *t) {
     t->rep_extra = extra;
     g_vk_tex_uploads++;
     static int trace = -1; if (trace < 0) trace = getenv("PWR_TEXPACK_TRACE") != NULL;
-    if (trace) fprintf(stderr, "texpack: %08x %ux%u fmt %d levels %d -> %ux%u (%u levels) key %016llX\n", t->addr, t->w, t->h, t->fmt, t->levels, rw, rh, levels, (unsigned long long)t->rep_key);
+    if (trace) fprintf(stderr, "texpack: %08x %ux%u fmt %d levels %d -> %ux%u (%u levels%s) key %016llX\n", t->addr, t->w, t->h, t->fmt, t->levels, rw, rh, levels,
+                       prepared ? ", prepared" : "", (unsigned long long)t->rep_key);
 }
 
 /* image view for a texture unit's current registers; NULL when the upload ring is full (caller flushes) */
@@ -835,8 +900,10 @@ static VkImageView tex_get_(int unit, int *full) {
         t->glyph_sheet = msr_glyph_sheet(g_mem + addr, w, h, fmt); t->glyph_ver = msr_glyph_version();
         if (t->rep.img) img_retire(&t->rep);
         t->rep_extra = 0;
-        t->rep_key = msr_textures_active() ? msr_texture_find(g_mem + addr, w, h, fmt, t->hash) : 0;
-    }
+        t->find_pending = 0;
+        t->rep_key = msr_textures_active() ? msr_texture_find(g_mem + addr, w, h, fmt, t->hash, &t->find_pending) : 0;
+    } else if (t->find_pending)   /* a pack worker works out its hash: asked again (the game's texture shows meanwhile) */
+        t->rep_key = msr_texture_find(g_mem + addr, w, h, fmt, t->hash, &t->find_pending);
     if (need && tex_upload(t)) { t->checked_list = 0; t->hash = 0; *full = 1; return NULL; }   /* hash 0: re-upload after the flush */
     if (t->rep_key && !t->rep.img) tex_replace(t);
     t->used_batch = t->last_batch = batch_no;
@@ -1249,6 +1316,7 @@ static int init(void) {
     VkBufferImageCopy cp = { .bufferOffset = off, .imageSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .imageExtent = { 1, 1, 1 } };
     vkCmdCopyBufferToImage(cb_up, upbuf.buf, white.img, VK_IMAGE_LAYOUT_GENERAL, 1, &cp);
     pica_vk_flush();
+    msr_textures_set_stager(stage_make, stage_drop);   /* texture packs: uploads prepared on their workers */
     if (preload_on && !getenv("PWR_NO_PRELOAD")) seed_load();
     fprintf(stderr, "pica_vk: hardware renderer on\n");
     return 0;

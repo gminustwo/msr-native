@@ -89,6 +89,7 @@ struct EmulatorSettings {
     int max_resolution = 10; ///< The largest factor offered
     bool quick_saves = true; ///< Quick save and load
     bool bloom_option = false; ///< The Bloom slider (msr-native)
+    bool deck_preset = false;  ///< The Steam Deck preset button (msr-native on a Steam Deck)
     int hdr_option = 0;        ///< The HDR rows: 0 none (the emulator build), 1 the display is not in HDR mode, 2 HDR possible
     float display_peak = 1000.f, display_paper = 200.f; ///< The display's peak brightness, Windows' SDR white (nits)
 };

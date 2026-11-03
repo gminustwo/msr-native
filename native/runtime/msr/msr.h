@@ -110,10 +110,16 @@ int  msr_textures_add_pack(const char *dir);   /* the enabled packs, highest pri
 void msr_textures_start(void);
 int  msr_textures_active(void);
 /* pica_vk: new bytes of a texture (level 0, w x h, PICA format; content = its hash of all levels): the pack's hash when
-   a pack replaces it (its PNG then loads on a worker), else 0 */
-uint64_t msr_texture_find(const uint8_t *level0, uint32_t w, uint32_t h, int fmt, uint64_t content);
-/* 1 and the replacement's RGBA rows (in pica_vk's order) once loaded, 0 while loading, -1 when it cannot be read */
-int  msr_texture_pixels(uint64_t key, const uint8_t **rgba, uint32_t *w, uint32_t *h);
+   a pack replaces it (its PNG then loads on a worker), else 0. *pending: not known yet (a worker works out the legacy
+   hash); ask again later with the same content. */
+uint64_t msr_texture_find(const uint8_t *level0, uint32_t w, uint32_t h, int fmt, uint64_t content, int *pending);
+/* pica_vk: what prepares a replacement's upload on the workers (make: pixels -> its own handle, any thread; drop: a
+   handle never taken). Not with PWR_TEXPACK_SYNC=1. */
+void msr_textures_set_stager(void *(*make)(const uint8_t *rgba, uint32_t w, uint32_t h), void (*drop)(void *staged));
+/* The replacement's RGBA rows (in pica_vk's order): 2 with its prepared upload in *staged (the caller's now), 1 with
+   the pixels only (the caller uploads them; always when !want_staged), 0 while loading or being prepared, -1 when it
+   cannot be read */
+int  msr_texture_take(uint64_t key, int want_staged, void **staged, const uint8_t **rgba, uint32_t *w, uint32_t *h);
 void msr_texture_done(uint64_t key);          /* uploaded: the pixels may go */
 void msr_textures_stats(unsigned *textures, unsigned *loaded, unsigned *failed);    /* dispatch.cpp, at the frame limiter's trap: runs the queued calls; 0 when it was ours */
 

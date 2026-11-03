@@ -994,9 +994,29 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             end_tab_item();
         }
         if (tab_item("Display", 1)) {
+            if (e.deck_preset) {
+                // Measured on a Steam Deck OLED with the 4x texture pack (2026-11-03): 3x, the Deck's own 720p,
+                // left 40% of the GPU spare at 60 FPS (about 100 without a limit); 4x held 60 with less to spare.
+                const bool in_use = e.resolution == 3 && e.vsync && p.frame_rate == 60;
+                if (ImGui::Button("Steam Deck: 60 FPS with texture packs", {-FLT_MIN, 0.f})) {
+                    e.resolution = 3;
+                    e.vsync = true;
+                    emulator_changed = true;
+                    p.frame_rate = 60;
+                    player_changed = true;
+                }
+                default_focus();
+                Note(in_use ? "In use: 3x internal resolution, 60 FPS, V-Sync. For even frames, set the Deck's refresh "
+                              "rate to 60 Hz (Quick Access menu, Performance)."
+                            : "Sets 3x internal resolution (the Deck's 720p), 60 FPS and V-Sync. For even frames, set "
+                              "the Deck's refresh rate to 60 Hz (Quick Access menu, Performance).");
+                ImGui::Spacing();
+            }
             row("Fullscreen");
             emulator_changed |= ImGui::Checkbox("##fullscreen", &e.fullscreen);
-            default_focus();
+            if (!e.deck_preset) {
+                default_focus();
+            }
             row("Widescreen (16:9)");
             player_changed |= ImGui::Checkbox("##widescreen", &p.widescreen);
             row("Camera zoom");

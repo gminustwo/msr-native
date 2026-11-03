@@ -17,6 +17,7 @@ float pica_f16(uint32_t v);
 float pica_f20(uint32_t v);
 /* texel at memory coordinates (x, y) of a tiled texture, RGBA8 packed r | g<<8 | b<<16 | a<<24 */
 uint32_t pica_texel(uint32_t addr, int fmt, int w, int x, int y);
+void pica_decode_level(uint32_t addr, int fmt, uint32_t w, uint32_t h, uint32_t *out);   /* a level as pica_texel, rows bottom-up */
 extern const int pica_tex_bpp[14];
 extern uint32_t pica_vs_prog[4096 + 128], pica_vs_version;   /* vertex shader program + swizzles, bumped on upload */
 extern V4 pica_vs_cf[96];

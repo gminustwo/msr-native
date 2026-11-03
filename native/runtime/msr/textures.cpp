@@ -26,6 +26,11 @@
 #ifdef MSR_HAVE_PNG
 #include <png.h>
 #endif
+#ifdef __linux__
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
 
 namespace {
 
@@ -170,12 +175,27 @@ struct Image {
     u32 w = 0, h = 0;
     std::vector<u8> rgba;
     bool uploaded = false;
+    void* staged = nullptr;      // its upload prepared by a worker (pica_vk.c's stager) until the GX thread takes it
+    bool stage_queued = false;   // a worker is to prepare it again from the kept pixels
+    bool stage_failed = false;   // the stager could not: the GX thread uploads it itself
+    bool busy = false;           // a worker reads its pixels unlocked: not let go meanwhile
 };
+struct Found { u64 key; bool pending; };   // a texture content's pack hash (0: none), or its legacy hash under way
+struct HashJob { u64 seen; u32 w, h; int fmt; std::vector<u8> level0; };
 std::mutex lock;
 std::condition_variable wake;
 std::unordered_map<u64, Image> images;     // by pack hash
-std::unordered_map<u64, u64> memo;         // texture content -> pack hash (0: none)
-std::deque<u64> queue;
+std::unordered_map<u64, Found> memo;       // texture content -> pack hash
+std::deque<u64> queue;                     // PNGs to decode, or kept pixels to prepare for the GPU again
+std::deque<HashJob> hash_jobs;             // legacy hashes to work out (before the PNGs: they are small)
+// The upload of a replacement, prepared on a worker (2026-11-03): on a Steam Deck the GX thread spent up to 17 ms
+// copying a 4096x4096 PNG into a new staging buffer and 1-5 ms creating its image, a missed frame each time one came in.
+// pica_vk.c registers make (pixels -> a staging buffer and an image, any thread) and drop (one never taken).
+void* (*stage_make)(const u8* rgba, u32 w, u32 h) = nullptr;
+void (*stage_drop)(void* staged) = nullptr;
+std::size_t staged_bytes = 0;              // prepared and not yet taken
+constexpr std::size_t StageBudget = 256u << 20;
+bool sync_find = false;                    // PWR_TEXPACK_SYNC=1: legacy hashes on the GX thread, no stager (as before)
 std::list<u64> kept;                       // uploaded images still in memory, oldest first
 std::size_t kept_bytes = 0;
 constexpr std::size_t KeptBudget = 512u << 20;
@@ -208,26 +228,63 @@ bool DecodePng(const fs::path& path, Image& out) {
 #endif
 }
 
+// Queues the PNG of a pack hash (lock held)
+void Request(u64 key) {
+    Image& image = images[key];
+    if (image.state == State::Idle) { image.state = State::Queued; queue.push_back(key); wake.notify_one(); }
+}
+
 void Worker() {
+#ifdef __linux__
+    // below the game's threads: a PNG decode is never in a hurry (the game's own texture shows meanwhile)
+    setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 5);
+#endif
+    std::unique_lock<std::mutex> guard(lock);
     for (;;) {
-        u64 key;
-        fs::path path;
-        {
-            std::unique_lock<std::mutex> guard(lock);
-            wake.wait(guard, [] { return !queue.empty(); });
-            key = queue.front();
-            queue.pop_front();
-            path = files[key];
+        wake.wait(guard, [] { return !queue.empty() || !hash_jobs.empty(); });
+        if (!hash_jobs.empty()) {   // a texture's legacy hash (msr_texture_find): its pack hash, then its PNG
+            HashJob job = std::move(hash_jobs.front());
+            hash_jobs.pop_front();
+            guard.unlock();
+            const u64 hash = LegacyHash(job.level0.data(), job.w, job.h, job.fmt);
+            guard.lock();
+            const u64 key = files.count(hash) ? hash : 0;
+            memo[job.seen] = {key, false};
+            if (key) Request(key);
+            continue;
         }
+        const u64 key = queue.front();
+        queue.pop_front();
+        Image& image = images[key];   // (elements of an unordered_map stay where they are)
+        if (image.state == State::Ready) {   // the pixels kept: their upload prepared again (msr_texture_take)
+            // stage_queued stays set until it is done (msr_texture_take waits for it); cleared, this entry is stale
+            if (!image.stage_queued || image.staged || image.rgba.empty() || !stage_make) { image.stage_queued = false; continue; }
+            image.busy = true;
+            const u8* px = image.rgba.data();
+            const u32 w = image.w, h = image.h;
+            guard.unlock();
+            void* staged = stage_make(px, w, h);
+            guard.lock();
+            image.busy = false;
+            image.stage_queued = false;
+            if (staged) { image.staged = staged; staged_bytes += image.rgba.size(); }
+            else image.stage_failed = true;
+            continue;
+        }
+        if (image.state != State::Queued) continue;
+        const fs::path path = files[key];
+        const bool stage = stage_make && staged_bytes < StageBudget;
+        guard.unlock();
         Image decoded;
         const bool ok = DecodePng(path, decoded);
-        std::lock_guard<std::mutex> guard(lock);
-        Image& image = images[key];
+        void* staged = ok && stage ? stage_make(decoded.rgba.data(), decoded.w, decoded.h) : nullptr;
+        guard.lock();
         if (ok) {
             image.w = decoded.w;
             image.h = decoded.h;
             image.rgba = std::move(decoded.rgba);
             image.state = State::Ready;
+            if (staged) { image.staged = staged; staged_bytes += image.rgba.size(); }
             loaded++;
         } else {
             image.state = State::Failed;
@@ -289,49 +346,79 @@ extern "C" void msr_textures_start(void) {
     return;
 #endif
     if (files.empty() || active) return;
-    const unsigned n = std::clamp(std::thread::hardware_concurrency() / 4, 2u, 4u);
+    sync_find = std::getenv("PWR_TEXPACK_SYNC") != nullptr;
+    const unsigned n = std::clamp(std::thread::hardware_concurrency() / 2 - 1, 2u, 4u);
     for (unsigned i = 0; i < n; ++i) workers.emplace_back(Worker).detach();
     active = true;
 }
 
 extern "C" int msr_textures_active(void) { return active.load(std::memory_order_relaxed); }
 
-extern "C" uint64_t msr_texture_find(const uint8_t* level0, uint32_t w, uint32_t h, int fmt, uint64_t content) {
+extern "C" uint64_t msr_texture_find(const uint8_t* level0, uint32_t w, uint32_t h, int fmt, uint64_t content, int* pending) {
+    *pending = 0;
     if (!active.load(std::memory_order_relaxed) || fmt < 0 || fmt > 13 || !w || !h || (w % 8) || (h % 8)) return 0;
     const u64 seen = content ^ (static_cast<u64>(w) << 40) ^ (static_cast<u64>(h) << 20) ^ static_cast<u64>(fmt);
+    const std::size_t bytes = std::size_t{w} * h * FormatBits[fmt] / 8;
     {
         std::lock_guard<std::mutex> guard(lock);
         if (const auto it = memo.find(seen); it != memo.end()) {
-            if (it->second) {
-                Image& image = images[it->second];
-                if (image.state == State::Idle) { image.state = State::Queued; queue.push_back(it->second); wake.notify_one(); }
-            }
-            return it->second;
+            if (it->second.pending) { *pending = 1; return 0; }
+            if (it->second.key) Request(it->second.key);
+            return it->second.key;
+        }
+        // The legacy hash decodes the texture as Azahar does: 20 ms for a 1024x1024 ETC1 texture on a Steam Deck, on the
+        // GX thread the first time it was drawn. A worker works it out from a copy (the game's texture shows meanwhile).
+        if (!use_new_hash && !sync_find) {
+            memo[seen] = {0, true};
+            hash_jobs.push_back({seen, w, h, fmt, std::vector<u8>(level0, level0 + bytes)});
+            wake.notify_one();
+            *pending = 1;
+            return 0;
         }
     }
-    const u64 hash = use_new_hash ? Common::CityHash64(reinterpret_cast<const char*>(level0), std::size_t{w} * h * FormatBits[fmt] / 8)
+    const u64 hash = use_new_hash ? Common::CityHash64(reinterpret_cast<const char*>(level0), bytes)
                                   : LegacyHash(level0, w, h, fmt);
     std::lock_guard<std::mutex> guard(lock);
     const u64 key = files.count(hash) ? hash : 0;
-    memo[seen] = key;
-    if (key) {
-        Image& image = images[key];
-        if (image.state == State::Idle) { image.state = State::Queued; queue.push_back(key); wake.notify_one(); }
-    }
+    memo[seen] = {key, false};
+    if (key) Request(key);
     return key;
 }
 
-extern "C" int msr_texture_pixels(uint64_t key, const uint8_t** rgba, uint32_t* w, uint32_t* h) {
+extern "C" void msr_textures_set_stager(void* (*make)(const uint8_t*, uint32_t, uint32_t), void (*drop)(void*)) {
     std::lock_guard<std::mutex> guard(lock);
+    if (sync_find) return;
+    stage_make = make;
+    stage_drop = drop;
+}
+
+extern "C" int msr_texture_take(uint64_t key, int want_staged, void** staged, const uint8_t** rgba, uint32_t* w, uint32_t* h) {
+    std::lock_guard<std::mutex> guard(lock);
+    *staged = nullptr;
     const auto it = images.find(key);
     if (it == images.end()) return -1;
     Image& image = it->second;
     if (image.state == State::Failed) return -1;
-    if (image.state == State::Idle) { image.state = State::Queued; queue.push_back(key); wake.notify_one(); }
+    if (image.state == State::Idle) Request(key);
     if (image.state != State::Ready) return 0;
     *rgba = image.rgba.data();
     *w = image.w;
     *h = image.h;
+    if (image.staged && !want_staged) { stage_drop(image.staged); image.staged = nullptr; staged_bytes -= image.rgba.size(); }
+    if (!want_staged) return 1;
+    if (image.staged) {
+        *staged = image.staged;
+        image.staged = nullptr;
+        staged_bytes -= image.rgba.size();
+        return 2;
+    }
+    if (image.stage_queued) return 0;
+    if (stage_make && !image.stage_failed && staged_bytes < StageBudget) {   // an upload again (the last one was taken)
+        image.stage_queued = true;
+        queue.push_back(key);
+        wake.notify_one();
+        return 0;
+    }
     return 1;
 }
 
@@ -344,6 +431,9 @@ extern "C" void msr_texture_done(uint64_t key) {
     kept_bytes += it->second.rgba.size();
     while (kept_bytes > KeptBudget && kept.size() > 1) {   // the oldest uploads go; a later use loads them again
         Image& old = images[kept.front()];
+        if (old.busy) break;   // a worker prepares its upload: later
+        if (old.staged) { stage_drop(old.staged); old.staged = nullptr; staged_bytes -= old.rgba.size(); }
+        old.stage_queued = false;
         kept_bytes -= old.rgba.size();
         old.rgba.clear();
         old.rgba.shrink_to_fit();
