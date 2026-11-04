@@ -29,6 +29,8 @@ void input_binding_text(int c, char* buf, size_t n);
 void input_bind_key(int c, int sym);
 void input_bind_pad(int c, int button);
 void input_release_all(void);
+void input_set_right_stick_dpad(int on);
+int input_right_stick_dpad(void);
 void video_set_fullscreen(int on);
 void video_set_vsync(int on);
 void video_set_resolution(int factor);
@@ -75,6 +77,8 @@ void RefreshControls() {
     s.rows.push_back({CStick, "C-Stick", "Not set"});
     s.capturing = capturing;
     s.controller_connected = video_pad_connected() != 0;
+    s.right_stick_option = true;
+    s.right_stick_dpad = input_right_stick_dpad() != 0;
     O().SetControls(s);
 }
 
@@ -85,11 +89,13 @@ void SaveControls() {
         file.SetNumber("native_controls", key + "_key", input_key_binds()[c]);
         file.SetNumber("native_controls", key + "_pad", input_pad_binds()[c]);
     }
+    file.SetBool("native_controls", "right_stick_dpad", input_right_stick_dpad() != 0);
     if (!file.Save()) std::fprintf(stderr, "msr: could not save the controls\n");
 }
 
 void LoadControls() {
     const MsrIni::File file(msr_settings_file());
+    input_set_right_stick_dpad(file.Bool("native_controls", "right_stick_dpad", input_right_stick_dpad() != 0));
     for (int c = 0; c < Controls; ++c) {
         const std::string key = input_control_key(c);
         if (file.Raw("native_controls", key + "_key")) {
@@ -484,6 +490,11 @@ extern "C" void msr_overlay_frame(void) {
             break;
         case Kind::KeyboardLayout:
             input_default_keys();
+            SaveControls();
+            RefreshControls();
+            break;
+        case Kind::RightStickDpad:
+            input_set_right_stick_dpad(action.value);
             SaveControls();
             RefreshControls();
             break;

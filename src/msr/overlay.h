@@ -105,6 +105,8 @@ struct ControlsSnapshot {
     std::vector<Row> rows;
     int capturing = -1; ///< Row waiting for a new input, or -1
     bool controller_connected = false;
+    bool right_stick_option = false; ///< msr-native: the Aeion abilities can be put on the right stick
+    bool right_stick_dpad = false;   ///< The right stick is the D-pad, the pad's D-pad the Circle Pad
 };
 
 /// The Mods and Textures tabs: game mods and texture packs (msr/mods.h). Built and applied on
@@ -155,6 +157,7 @@ struct OverlayAction {
         CancelBind,
         GamepadLayout,    ///< Map every control to the connected gamepad, by position
         KeyboardLayout,   ///< Restore the default keyboard bindings
+        RightStickDpad,   ///< msr-native: the Aeion abilities on the right stick (`value` 0 or 1)
         FrameRate,        ///< The frame rate changed: apply the CPU clock and presentation
         GameMod,          ///< Enable or disable game mod `value` (an index in ModsSnapshot)
         GameModUp,        ///< Raise game mod `value`'s priority

@@ -659,6 +659,7 @@ static void pad_axes(void) {
         rx = na > r0 ? SDL_JoystickGetAxis(joy, r0) : 0; ry = na > r0 + 1 ? -SDL_JoystickGetAxis(joy, r0 + 1) : 0;
     } else return;
     input_pad_stick(x, y);
+    input_pad_rstick(rx, ry);   /* the D-pad when the Aeion abilities are on the right stick (input.c) */
     freelook_stick(rx, ry);
 }
 

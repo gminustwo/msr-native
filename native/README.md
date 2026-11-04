@@ -57,6 +57,11 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   A Nintendo pad keeps the game's layout, which its labels already match; SDL is asked for every pad's buttons by
   position (SDL 2 gave a Nintendo pad's by label, so its A came as the bottom button). `PWR_MSR_TRACE=1` logs the
   layouts changing.
+- The Aeion abilities on the right stick (2026-11-03; the Controls tab's checkbox, in the launcher and the game's menu,
+  `settings.ini` `[native_controls]` `right_stick_dpad`): the right stick pushed past half way is the 3DS D-pad in the
+  one direction it is pushed furthest (let go under a third), and the pad's D-pad moves the circle pad as the left
+  stick does, whatever its buttons are bound to (`input.c` input_pad_rstick; a raw joystick's hat too). Touch
+  navigation still steps with the D-pad. The Controls rows and reference name the right stick and the D-pad then.
 - Mouse aiming (`video.c`, `input.c`): in play the left button shoots (3DS Y; on the bottom screen it still touches)
   and the right one held is Free Aim (3DS L) with the circle pad all the way toward the pointer from Samus: her
   entity's position (Samus's handle at the game +0xFC, then +0xFC..+0x104, about her arm cannon's height) seen by the

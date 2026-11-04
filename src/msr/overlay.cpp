@@ -657,6 +657,14 @@ void Overlay::DrawControls(float scale, float label_width,
     if (ImGui::Button("Keyboard layout", {half, 0.f})) {
         Act(OverlayAction::Kind::KeyboardLayout);
     }
+    // msr-native: the Aeion abilities (the 3DS D-pad) on the right stick, the pad's D-pad moving
+    // Samus as the left stick does
+    if (snapshot.right_stick_option) {
+        bool on = snapshot.right_stick_dpad;
+        if (ImGui::Checkbox("Aeion abilities on the right stick (the D-pad moves)", &on)) {
+            Act(OverlayAction::Kind::RightStickDpad, on ? 1 : 0);
+        }
+    }
 
     // The bindings scroll in their own region; the reference stays below them. msr-native names
     // the keys or buttons of the device in use (ButtonGlyphs::Keys) and aims with the mouse (video.c).
@@ -673,6 +681,9 @@ void Overlay::DrawControls(float scale, float label_width,
         const u32 dev = ButtonGlyphs::device.load();
         if (dev == ButtonGlyphs::Xbox || dev == ButtonGlyphs::PlayStation || dev == ButtonGlyphs::Nintendo) {
             reference.push_back(ButtonGlyphs::Keys("In menus: {Choose} chooses, {Back} goes back (the rows above are for play)"));
+        }
+        if (snapshot.right_stick_dpad) {
+            reference.push_back("Aeion abilities: the right stick        The D-pad moves, as the left stick");
         }
     } else {
         reference = {

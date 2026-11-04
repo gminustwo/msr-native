@@ -27,7 +27,9 @@ static int touch_down, touch_x, touch_y;
 static uint32_t pad_keys;                    /* digital buttons from a gamepad: what its held buttons pressed (pad_recount) */
 static int pad_cl, pad_cr, pad_cu, pad_cd;   /* the circle pad from pad buttons bound to it */
 static unsigned char pad_held[SDL_CONTROLLER_BUTTON_MAX];   /* each held pad button's control + 1 as at its press (0: none) */
-static uint32_t raw_held[12];                /* each held raw joystick button's 3DS bit as at its press */
+static unsigned char raw_held[12];           /* each held raw joystick button's control + 1 as at its press */
+static int rstick_dpad;                      /* the option: the right stick is the D-pad, the pad's D-pad the circle pad */
+static uint32_t rstick_bits;                 /* the D-pad direction the right stick holds */
 static int pad_x, pad_y;                     /* gamepad stick, -32768..32767 */
 static int mouse_fire, mouse_aim;            /* the mouse in play (video.c): Y, and L with the circle pad toward aim_x/y */
 static float aim_x, aim_y;
@@ -44,8 +46,9 @@ void input_bind(KObject *mem, KObject *pad0) { pthread_mutex_lock(&I); shmem = m
  * too and Enter is A where they are not bound. The pad by position (east = A, south = B, north = X, west = Y) in play,
  * the menus' layout below in menus and dialogs, its triggers ZL and ZR, its left stick the circle pad. The left mouse
  * button on the bottom screen touches; in play the left button elsewhere shoots, the right one aims and the wheel
- * changes beams (video.c). ZL and ZR are the triggers' taps (Morph Ball, next beam: msr_trigger); Select opens the settings (the game
- * takes Select as Start), unless video.c's select_layout says otherwise. */
+ * changes beams (video.c). ZL and ZR are the triggers' taps (Morph Ball, next beam: msr_trigger); Select opens the
+ * settings (the game takes Select as Start), unless video.c's select_layout says otherwise. The right stick can be
+ * the D-pad, the pad's D-pad then the circle pad (rstick_dpad, below). */
 static const char *const ctrl_label[C_COUNT] = { "A", "B", "X", "Y", "L", "R", "ZL", "ZR", "Start", "Select (settings)",
                                                  "D-pad up", "D-pad down", "D-pad left", "D-pad right",
                                                  "Circle Pad up", "Circle Pad down", "Circle Pad left", "Circle Pad right" };
@@ -82,7 +85,33 @@ int input_pad_bound(int c, int menu) {
     const int b = pad_bind[c];
     return menu && (b == SDL_CONTROLLER_BUTTON_A || b == SDL_CONTROLLER_BUTTON_B) ? -1 : b;
 }
+/* The Aeion abilities on the right stick (2026-11-03, the user: "an option that transfers the d-pad functionality for
+   selecting aeion abilities to the right control stick and then the d-pad can move like the left stick"; the settings'
+   Controls tab, settings.ini [native_controls] right_stick_dpad): the right stick pushed past half way is the 3DS D-pad
+   in the one direction it is pushed furthest (input_pad_rstick), and the pad's D-pad buttons move the circle pad,
+   whatever they are bound to. Touch navigation still steps with the D-pad (video.c). */
+void input_set_right_stick_dpad(int on) { pthread_mutex_lock(&I); rstick_dpad = on != 0; rstick_bits = 0; pthread_mutex_unlock(&I); }
+int input_right_stick_dpad(void) { return rstick_dpad; }
+static int dpad_circle(int button) {   /* the circle pad direction a pad's D-pad button is under the option, else -1 */
+    if (!rstick_dpad) return -1;
+    switch (button) {
+    case SDL_CONTROLLER_BUTTON_DPAD_UP: return C_CUP;     case SDL_CONTROLLER_BUTTON_DPAD_DOWN: return C_CDOWN;
+    case SDL_CONTROLLER_BUTTON_DPAD_LEFT: return C_CLEFT; case SDL_CONTROLLER_BUTTON_DPAD_RIGHT: return C_CRIGHT;
+    }
+    return -1;
+}
+void input_pad_rstick(int x, int y) {
+    const int ax = abs(x), ay = abs(y), m = ax > ay ? ax : ay;
+    pthread_mutex_lock(&I);
+    uint32_t bit = 0;
+    if (rstick_dpad && m >= (rstick_bits ? 11000 : 16000))   /* past half way; let go under a third */
+        bit = ax > ay ? (x > 0 ? B_RIGHT : B_LEFT) : (y > 0 ? B_UP : B_DOWN);
+    rstick_bits = bit;
+    pthread_mutex_unlock(&I);
+}
 int input_pad_control_now(int button) {
+    const int circle = dpad_circle(button);
+    if (circle >= 0) return circle;
     const int menu = msr_menu_buttons();
     if (menu && (button == SDL_CONTROLLER_BUTTON_A || button == SDL_CONTROLLER_BUTTON_B)) return button == SDL_CONTROLLER_BUTTON_A ? C_A : C_B;
     const int c = input_pad_control(button);
@@ -109,7 +138,13 @@ void input_binding_text(int c, char *buf, size_t n) {
     if (c < 0 || c >= C_COUNT) { snprintf(buf, n, "Not set"); return; }
     char key[64] = "", pad[48] = "";
     if (key_bind[c] >= 0) { const char *k = SDL_GetKeyName(key_bind[c]); snprintf(key, sizeof key, "Key %s", k && *k ? k : "?"); }
-    if (pad_bind[c] >= 0) snprintf(pad, sizeof pad, "Gamepad %s", pad_name(pad_bind[c]));
+    static const char *const dir[4] = { "up", "down", "left", "right" };
+    const int own = pad_bind[c] >= 0 && dpad_circle(pad_bind[c]) < 0;   /* a pad button that is still its own */
+    if (rstick_dpad && c >= C_UP && c <= C_RIGHT)   /* the option: the right stick (and a button bound here that is not the D-pad) */
+        snprintf(pad, sizeof pad, "Gamepad %s%sright stick %s", own ? pad_name(pad_bind[c]) : "", own ? " / " : "", dir[c - C_UP]);
+    else if (rstick_dpad && c >= C_CUP)   /* the option: the D-pad (and the left stick, as always) */
+        snprintf(pad, sizeof pad, "Gamepad %s%sD-pad %s", own ? pad_name(pad_bind[c]) : "", own ? " / " : "", dir[c - C_CUP]);
+    else if (pad_bind[c] >= 0) snprintf(pad, sizeof pad, "Gamepad %s", pad_name(pad_bind[c]));
     else if (c == C_ZL || c == C_ZR) snprintf(pad, sizeof pad, "Gamepad %s trigger", c == C_ZL ? "left" : "right");
     snprintf(buf, n, "%s%s%s", key, key[0] && pad[0] ? ", " : "", pad[0] || key[0] ? pad : "Not set");
 }
@@ -147,12 +182,11 @@ void input_key(int sym, int down) {
 /* under I: the pad's buttons and its circle pad from what each held button pressed */
 static void pad_recount(void) {
     pad_keys = 0; pad_cu = pad_cd = pad_cl = pad_cr = 0;
-    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++) {
-        const int c = pad_held[b] - 1;
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX + 12; b++) {
+        const int c = (b < SDL_CONTROLLER_BUTTON_MAX ? pad_held[b] : raw_held[b - SDL_CONTROLLER_BUTTON_MAX]) - 1;
         if (c == C_CUP) pad_cu = 1; else if (c == C_CDOWN) pad_cd = 1; else if (c == C_CLEFT) pad_cl = 1; else if (c == C_CRIGHT) pad_cr = 1;
         else if (c >= 0) pad_keys |= ctrl_bit[c];
     }
-    for (int b = 0; b < 12; b++) pad_keys |= raw_held[b];
 }
 /* a gamepad button through the bindings (controllers with an SDL mapping), the menus' layout in menus */
 void input_pad_sdl(int button, int down) {
@@ -164,13 +198,15 @@ void input_pad_sdl(int button, int down) {
     pthread_mutex_unlock(&I);
 }
 /* raw joysticks (no SDL mapping, video.c): positional layout, south = 3DS B, east = A, west = Y, north = X; in menus
-   south = A and east = B, as the mapped pads */
+   south = A and east = B, and under the right stick option the hat moves the circle pad, as the mapped pads */
 void input_pad_button(int b, int down) {
-    static const uint32_t map[12] = { B_B, B_A, B_Y, B_X, B_L, B_R, B_SELECT, B_START, B_UP, B_DOWN, B_LEFT, B_RIGHT };
+    static const int map[12] = { C_B, C_A, C_Y, C_X, C_L, C_R, C_SELECT, C_START, C_UP, C_DOWN, C_LEFT, C_RIGHT };
     if (b < 0 || b >= 12) return;
-    const uint32_t bit = b < 2 && down && msr_menu_buttons() ? (b == 0 ? B_A : B_B) : map[b];
+    int c = map[b];
+    if (down && b < 2 && msr_menu_buttons()) c = b == 0 ? C_A : C_B;
+    if (down && b >= 8 && rstick_dpad) c = C_CUP + (b - 8);
     pthread_mutex_lock(&I);
-    raw_held[b] = down ? bit : 0;
+    raw_held[b] = down ? (unsigned char)(c + 1) : 0;
     pad_recount();
     pthread_mutex_unlock(&I);
 }
@@ -197,7 +233,7 @@ void input_touch(int down, int x, int y) {
 
 void input_release_all(void) {
     pthread_mutex_lock(&I); keys = pad_keys = 0; stick_l = stick_r = stick_u = stick_d = 0; pad_cl = pad_cr = pad_cu = pad_cd = 0;
-    memset(pad_held, 0, sizeof pad_held); memset(raw_held, 0, sizeof raw_held);
+    memset(pad_held, 0, sizeof pad_held); memset(raw_held, 0, sizeof raw_held); rstick_bits = 0;
     pad_x = pad_y = 0; touch_down = 0;
     mouse_fire = mouse_aim = 0; pthread_mutex_unlock(&I);
 }
@@ -207,7 +243,7 @@ int input_stick_active(void) {
     return a;
 }
 static uint32_t mouse_buttons(void) { return (mouse_fire ? B_Y : 0) | (mouse_aim ? B_L : 0); }
-uint32_t input_buttons(void) { pthread_mutex_lock(&I); uint32_t b = keys | pad_keys | mouse_buttons(); pthread_mutex_unlock(&I); return b; }
+uint32_t input_buttons(void) { pthread_mutex_lock(&I); uint32_t b = keys | pad_keys | rstick_bits | mouse_buttons(); pthread_mutex_unlock(&I); return b; }
 
 void input_update(void) {
     pthread_mutex_lock(&I);
@@ -216,7 +252,7 @@ void input_update(void) {
     int cx = ((stick_r || pad_cr) - (stick_l || pad_cl)) * CIRCLE_MAX, cy = ((stick_u || pad_cu) - (stick_d || pad_cd)) * CIRCLE_MAX;
     if (!cx && !cy && (abs(pad_x) > 6000 || abs(pad_y) > 6000)) { cx = pad_x * CIRCLE_MAX / 32768; cy = pad_y * CIRCLE_MAX / 32768; }
     if (mouse_aim) { cx = (int)lrintf(aim_x * CIRCLE_MAX); cy = (int)lrintf(aim_y * CIRCLE_MAX); }
-    uint32_t btn = keys | pad_keys | mouse_buttons();
+    uint32_t btn = keys | pad_keys | rstick_bits | mouse_buttons();
     if (msr_input_blocked()) { btn = 0; cx = cy = 0; }   /* Samus Returns' touch navigation has the pad (msr/compositor.cpp) */
     if (cx > 0x28) btn |= B_CRIGHT; if (cx < -0x28) btn |= B_CLEFT;
     if (cy > 0x28) btn |= B_CUP;    if (cy < -0x28) btn |= B_CDOWN;

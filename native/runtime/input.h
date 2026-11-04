@@ -25,6 +25,9 @@ void input_bind_pad(int c, int sdl_button);
 void input_pad_button(int pos_button, int down); /* raw joysticks, positional: 0=south 1=east 2=west 3=north 4=L 5=R 6=select 7=start 8..11=dpad up/down/left/right */
 void input_pad_release(void);                   /* the pad went away: its buttons come up */
 void input_pad_stick(int x, int y);             /* -32768..32767, y up positive */
+void input_pad_rstick(int x, int y);            /* the right stick, the same: the D-pad under the option below */
+void input_set_right_stick_dpad(int on);        /* the Aeion abilities (D-pad) on the right stick, the pad's D-pad the circle pad */
+int input_right_stick_dpad(void);
 void input_touch(int down, int x, int y);       /* bottom-screen pixel coordinates */
 void input_mouse(int fire, int aim, float x, float y);   /* the mouse in play: Shoot, and Free Aim toward (x, y) (unit, y up) */
 void input_update(void);                        /* once per VBlank */
