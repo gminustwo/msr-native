@@ -455,6 +455,9 @@ static int recreate_swapchain(void) {
 }
 
 int video_init(int scale) {
+    /* every pad's face buttons by position (A = bottom), as input.c, glyphs.cpp and the settings take them: SDL 2 names a
+       Nintendo pad's by label unless told (its A, on the right, came as SDL's A, the bottom button) */
+    SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | (g_input_none ? 0 : SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK))) { fprintf(stderr, "video: SDL_Init: %s\n", SDL_GetError()); return -1; }
     static const int cw[L_COUNT] = { TOP_W, TOP_W + BOT_W, TOP_W + BOT_W / 2, TOP_W, BOT_W, 0, TOP_W }, chh[L_COUNT] = { 2 * SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, 2 * SCR_H };
     int win_w = opt_layout == L_SINGLE ? SCR_H * scale * 16 / 9 : cw[opt_layout] * scale;   /* single: 16:9 (1280x720 at 3) */
@@ -826,12 +829,13 @@ int video_frame(void) {
             int key_toggle = (e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && (e.key.keysym.sym == SDLK_F1 ||
                              (opt_select_layout == 2 && input_key_control(e.key.keysym.sym) == C_SELECT));
             int pad_toggle = (e.type == SDL_CONTROLLERBUTTONDOWN || e.type == SDL_CONTROLLERBUTTONUP) && !g_input_none &&
-                             opt_select_layout == 2 && input_pad_control(e.cbutton.button) == C_SELECT;
+                             opt_select_layout == 2 && input_pad_control_now(e.cbutton.button) == C_SELECT;
             if (key_toggle || pad_toggle) {
                 if ((e.type == SDL_KEYDOWN && !e.key.repeat) || e.type == SDL_CONTROLLERBUTTONDOWN) msr_overlay_toggle();
                 continue;
             }
         }
+        if (e.type == SDL_CONTROLLERBUTTONDOWN && !g_input_none) pad_used(pad_of(e.cbutton.which));   /* the settings name its buttons too */
         if (msr_overlay_event(&e, msx, msy)) continue;
         switch (e.type) {
         case SDL_QUIT: return 0;
@@ -842,34 +846,34 @@ int video_frame(void) {
             for (int i = 0; i < MAX_PADS; i++) if (gcs[i] == c) gcs[i] = NULL;
             SDL_GameControllerClose(c);
             if (gc == c) {
-                gc = NULL; input_pad_stick(0, 0); for (int b = 0; b < 12; b++) input_pad_button(b, 0);
+                gc = NULL; input_pad_stick(0, 0); input_pad_release();
                 for (int i = 0; i < MAX_PADS; i++) if (gcs[i]) { pad_used(gcs[i]); break; }
                 if (!gc) msr_input_device(0, 0);
             }
             break;
         }
-        case SDL_JOYDEVICEREMOVED: if (joy && e.jdevice.which == SDL_JoystickInstanceID(joy)) { SDL_JoystickClose(joy); joy = NULL; input_pad_stick(0, 0); for (int b = 0; b < 12; b++) input_pad_button(b, 0); } break;
+        case SDL_JOYDEVICEREMOVED: if (joy && e.jdevice.which == SDL_JoystickInstanceID(joy)) { SDL_JoystickClose(joy); joy = NULL; input_pad_stick(0, 0); input_pad_release(); } break;
         case SDL_CONTROLLERBUTTONDOWN: case SDL_CONTROLLERBUTTONUP: if (g_input_none) break;
-            if (e.type == SDL_CONTROLLERBUTTONDOWN) pad_used(pad_of(e.cbutton.which));
-            {   /* Samus Returns' touch navigation: L3 in menus; while on, the D-pad moves, the right face button is the finger,
-                   the bottom one leaves (the game's layout: 3DS A is on the right) */
-                int c = e.cbutton.button, down = e.type == SDL_CONTROLLERBUTTONDOWN;
+            {   /* Samus Returns' touch navigation: L3 in menus; while on, the D-pad moves, the menus' choosing button is the
+                   finger and their back button leaves (msr_pad_choose: the bottom and right ones, a Nintendo pad's A and B) */
+                int c = e.cbutton.button, down = e.type == SDL_CONTROLLERBUTTONDOWN, choose = msr_pad_choose();
+                int back = choose == SDL_CONTROLLER_BUTTON_A ? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A;
                 if (c == SDL_CONTROLLER_BUTTON_LEFTSTICK) { if (down) msr_touch_l3(); break; }
                 if (msr_touch_active()) {
                     if (down && c == SDL_CONTROLLER_BUTTON_DPAD_UP) msr_touch_step(0, -1);
                     else if (down && c == SDL_CONTROLLER_BUTTON_DPAD_DOWN) msr_touch_step(0, 1);
                     else if (down && c == SDL_CONTROLLER_BUTTON_DPAD_LEFT) msr_touch_step(-1, 0);
                     else if (down && c == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) msr_touch_step(1, 0);
-                    else if (c == SDL_CONTROLLER_BUTTON_B) msr_touch_finger(down);
-                    else if (down && c == SDL_CONTROLLER_BUTTON_A) msr_touch_close();
+                    else if (c == choose) msr_touch_finger(down);
+                    else if (down && c == back) msr_touch_close();
                     input_pad_sdl(c, down);   /* the pad's state stays true; the game sees none of it while blocked */
                     break;
                 }
             }
-            if (opt_select_layout == 1 && input_pad_control(e.cbutton.button) == C_SELECT) {
+            if (opt_select_layout == 1 && input_pad_control_now(e.cbutton.button) == C_SELECT) {
                 if (e.type == SDL_CONTROLLERBUTTONDOWN) next_layout(); break; }
             {   /* ZL and ZR bound to a button: the triggers' taps */
-                int c = input_pad_control(e.cbutton.button);
+                int c = input_pad_control_now(e.cbutton.button);
                 if (c == C_ZL || c == C_ZR) { if (e.type == SDL_CONTROLLERBUTTONDOWN) msr_trigger(c == C_ZR); break; }
             }
             input_pad_sdl(e.cbutton.button, e.type == SDL_CONTROLLERBUTTONDOWN); break;

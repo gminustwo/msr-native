@@ -252,8 +252,11 @@ inline constexpr std::array<int, 4> MapRect = {0, 58, 252, 213};
 /// orange helmet by turns. The game keeps it in the middle of its map (x 125, y 135) but stops
 /// scrolling near an area's edges, where the marker moves instead, a map tile (10 px) at a time.
 /// The red and orange pixels are counted in 4 px cells, and the marker is the 12 px square
-/// holding most: about 42 when fully lit, under 32 while it fades (and its edges with it). Not
-/// found when it is faint or something else on the map is as red.
+/// holding most: 36-38 when fully lit (about 29 with the HD texture pack at 9x, as the read-back
+/// samples the larger picture), under 20 while it fades. Not found when it is faint or something
+/// else on the map is as red. Its red is deep (green and blue under 0.3 of it but at the pack's
+/// edges); the red map pin's is lighter (a third) and is not counted (2026-11-03, the user: with
+/// a pin placed the minimap stayed on the pin, found while the marker faded).
 struct Marker {
     bool found = false;
     float x = 0.f, y = 0.f; ///< Its middle
@@ -266,7 +269,7 @@ inline Marker FindMapMarker(const Image& image) {
     const auto marker = [&image](int x, int y) {
         int r, g, b;
         image.Rgb(x, y, r, g, b);
-        const bool red = r >= 0x60 && g * 5 <= r * 2 && b * 5 <= r * 2;
+        const bool red = r >= 0x60 && g * 10 <= r * 3 && b * 10 <= r * 3;
         const bool visor = r >= 0xc0 && g * 20 >= r * 9 && g * 4 <= r * 3 && b * 10 <= r * 3;
         return red || visor;
     };
@@ -296,7 +299,7 @@ inline Marker FindMapMarker(const Image& image) {
             }
         }
     }
-    if (best < 32 || total - best > 24) {
+    if (best < 20 || total - best > 24) {
         return {};
     }
     // Its middle: the box around its pixels in that square.

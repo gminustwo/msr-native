@@ -17,10 +17,13 @@ void input_default_keys(void);
 void input_default_pad(void);
 int input_key_control(int sdl_keycode);         /* the control bound to it, or -1 */
 int input_pad_control(int sdl_button);
+int input_pad_control_now(int sdl_button);      /* the same, in the menus' layout while it applies (msr_menu_buttons) */
+int input_pad_bound(int c, int menu);           /* the pad button control c has (menu: in the menus' layout), or -1 */
 void input_binding_text(int c, char *buf, size_t n);   /* "Key X, Gamepad B" */
 void input_bind_key(int c, int sdl_keycode);
 void input_bind_pad(int c, int sdl_button);
 void input_pad_button(int pos_button, int down); /* raw joysticks, positional: 0=south 1=east 2=west 3=north 4=L 5=R 6=select 7=start 8..11=dpad up/down/left/right */
+void input_pad_release(void);                   /* the pad went away: its buttons come up */
 void input_pad_stick(int x, int y);             /* -32768..32767, y up positive */
 void input_touch(int down, int x, int y);       /* bottom-screen pixel coordinates */
 void input_mouse(int fire, int aim, float x, float y);   /* the mouse in play: Shoot, and Free Aim toward (x, y) (unit, y up) */

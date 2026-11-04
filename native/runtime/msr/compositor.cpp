@@ -44,6 +44,10 @@ struct Style {
 };
 
 constexpr float MapWindowWidth = 120.f, MapWindowHeight = 80.f;
+// Samus's marker on the HUD's map: where the game keeps it, and how far it may be from there or from its last place
+// to be taken at once (it moves a map tile, 10 px, at a time)
+constexpr Vec2 MapMiddle{125.f, 135.f};
+constexpr float MarkerReach = 24.f;
 constexpr float FadePerSecond = 9.f, PromptFadePerSecond = 6.f;
 
 Rect Source(float x0, float y0, float x1, float y1) { return {x0 / 320.f, y0 / 240.f, x1 / 320.f, y1 / 240.f}; }
@@ -62,6 +66,8 @@ struct State {
     bool paused = false;
     s64 prompt_since_us = 0, prompt_seen_us = 0;
     bool in_play = false;
+    s64 hud_seen_us = -1'000'000'000;   // the HUD last showed (the pad's menus' layout, glyphs.cpp): not yet
+    bool menu_icons = true;   // the icons in the menus' layout: the game starts in its menus
     float zoom = 1.f;
     Rect prompt_text, prompt_card, prompt_card_shown;
     s64 prompt_card_us = 0, prompt_tall_us = 0, prompt_foreign_us = 0;
@@ -70,6 +76,8 @@ struct State {
     bool bottom_black = false;
     float gallery = 0;
     Vec2 map_marker{125.f, 135.f}, map_center{125.f, 135.f};
+    Vec2 marker_far{};          // a marker found away from the last one (Consume), since marker_far_us (-1: none)
+    s64 marker_far_us = -1;
     std::array<Vec3, 4> map_backdrop{};
     std::array<s64, 3> beam_seen_us{-1, -1, -1}, beam_empty_us{-1, -1, -1};
     bool beams_greyed = false;
@@ -140,8 +148,24 @@ void Consume(const BC::Image& image, s64 now) {
         if (!result.beams.greyed) P::beam_slot.store(result.beams.lit, std::memory_order_relaxed);
         st.beams_greyed = result.beams.greyed;
         if (result.marker.found) {
-            st.map_marker = {result.marker.x, result.marker.y};
-            if (st.hud_alpha <= 0.f) st.map_center = st.map_marker;
+            // Samus's marker, not something else as red seen while it fades (2026-11-03: a red map pin, which the
+            // classifier no longer counts): taken near where it was or the map's middle, where the game keeps it;
+            // elsewhere (a new area, a teleport) once found there for 0.75 s without it showing near the last place
+            const Vec2 m{result.marker.x, result.marker.y};
+            const auto near = [&m](Vec2 p) { return std::hypot(m.x - p.x, m.y - p.y) <= MarkerReach; };
+            bool take = st.hud_alpha <= 0.f || near(st.map_marker) || near(MapMiddle);
+            if (!take) {
+                if (st.marker_far_us < 0 || !near(st.marker_far)) {
+                    st.marker_far = m;
+                    st.marker_far_us = now;
+                }
+                take = now - st.marker_far_us >= 750'000;
+            }
+            if (take) {
+                st.map_marker = m;
+                st.marker_far_us = -1;
+                if (st.hud_alpha <= 0.f) st.map_center = st.map_marker;
+            }
         }
         const auto& [mx0, my0, mx1, my1] = BC::MapRect;
         const int half_w = static_cast<int>(MapWindowWidth) / 2, half_h = static_cast<int>(MapWindowHeight) / 2;
@@ -284,6 +308,17 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
 
     if (state != P::Bottom::Prompt) st.prompt_since_us = now_us;
     else st.prompt_seen_us = now_us;
+    // The pad's menus' layout (glyphs.cpp): its buttons choose and go back unless the HUD shows, from a menu at once or
+    // anything else held 300 ms (2026-11-03, the user: "in game it also needs to change too": the game's dialogs over
+    // play, "Save your progress?", show the emblem below). Its icons follow from a menu, or a prompt held 300 ms (the
+    // title's), until the HUD shows; cutscenes, loading and those dialogs keep what was (their text names play's buttons).
+    if (state == P::Bottom::Hud) {
+        st.hud_seen_us = now_us;
+        st.menu_icons = false;
+    } else if (state == P::Bottom::Menu || (state == P::Bottom::Prompt && now_us - st.prompt_since_us >= 300'000)) {
+        st.menu_icons = true;
+    }
+    msr_buttons_state(state != P::Bottom::Hud && (state == P::Bottom::Menu || now_us - st.hud_seen_us >= 300'000), st.menu_icons);
     const auto page = static_cast<P::Page>(P::page.load(std::memory_order_relaxed));
     if (state == P::Bottom::Hud) {
         st.in_play = true;

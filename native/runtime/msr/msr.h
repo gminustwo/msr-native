@@ -78,6 +78,13 @@ int msr_samus_view(float *h, float *v);   /* Samus on the top screen in the game
 int msr_input_pad_active(void);   /* the last input came from a gamepad (glyphs.cpp) */
 void msr_input_device(int pad, int sdl_type);   /* video.c: the input just used (0 = keyboard/mouse), for the button names and icons (glyphs.cpp) */
 void msr_input_bindings_changed(void);
+/* Unless the HUD shows, an Xbox or PlayStation pad chooses with its bottom face button and goes back with its right one
+   (glyphs.cpp; input.c input_pad_bound): msr_buttons_state (compositor.cpp, each frame) says whether its buttons and its
+   icons follow that layout, msr_menu_buttons whether a pad's buttons do now, msr_pad_choose the SDL button that
+   chooses (touch mode, the settings). */
+void msr_buttons_state(int input, int icons);
+int msr_menu_buttons(void);
+int msr_pad_choose(void);
 int msr_glyph_sheet(const uint8_t *level0, uint32_t w, uint32_t h, int fmt);   /* pica_vk.c: one of the face-button icon sheets (1, 2) or 0 */
 void msr_glyph_patch(int sheet, uint8_t *rgba, uint32_t w, uint32_t h);
 unsigned msr_glyph_version(void);

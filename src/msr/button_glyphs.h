@@ -3,8 +3,9 @@
 // Refer to the license.txt file included.
 
 // The game's face button icons (A, B, X, Y) as an Xbox pad labels the buttons they are bound to.
-// The game draws them from two textures: its font sheet (the icons inside text, "Press Ⓐ to
-// Start") and its interface atlas (the same icons as sprites). With the usual bindings the 3DS A
+// The game draws them from three textures: its font sheet (the icons inside text, "Press Ⓐ to
+// Start"), its interface atlas (the same icons as sprites) and the top screen's atlas (only A and
+// B, the dialogs' "Ⓐ ✔" and "Ⓑ ✖"). With the usual bindings the 3DS A
 // is the right face button, which Xbox labels B, so the A icon shows the game's own B icon, and
 // so on: the renderer copies the icon cells within each texture as it uploads it
 // (rasterizer_cache.h), and the in-game menu names the buttons the same way. Other pads keep the
@@ -43,10 +44,15 @@ inline constexpr u32 Shown(u32 mapping, u32 face) {
     return (mapping >> (face * 2)) & 3;
 }
 
-/// A face icon's cell, in the texture as dumped (top row first). All are 13 x 13.
+/// A face icon's cell, in the texture as dumped (top row first). All are 13 x 13. NoCell: the
+/// sheet has no icon for that face (the top screen's atlas has only A and B).
 struct Cell {
     u32 x, y;
 };
+inline constexpr Cell NoCell{~0u, ~0u};
+inline constexpr bool Has(const Cell& cell) {
+    return cell.x != NoCell.x;
+}
 inline constexpr u32 CellSize = 13;
 /// The L and R icons (a tab with the letter cut in, one top corner cut off) are 18 x 13.
 inline constexpr u32 ShoulderWidth = 18, ShoulderHeight = 13;
@@ -61,11 +67,14 @@ struct Sheet {
 };
 
 /// Samus Returns (USA).
-inline constexpr std::array<Sheet, 2> Sheets{{
+inline constexpr std::array<Sheet, 3> Sheets{{
     // The font sheet (IA8), several sizes of text and the button icons.
     {0x5223C28BC4470EB0, 512, 256, 5, {{{23, 204}, {87, 143}, {25, 221}, {105, 139}}}, {{{2, 226}, {63, 159}}}},
     // The interface atlas (I8): the same icons beside the D-pad, L, R and START sprites.
     {0xB0F410A02C69F9AB, 1024, 512, 7, {{{706, 66}, {691, 66}, {706, 51}, {691, 51}}}, {{{720, 66}, {720, 51}}}},
+    // The top screen's interface atlas (RGBA8): the dialogs' "(A) check mark" and "(B) cross"
+    // ("Save your progress?"), only A and B.
+    {0x6EFC9BD1FD290C7A, 512, 256, 0, {{{415, 46}, {426, 31}, NoCell, NoCell}}, {{NoCell, NoCell}}},
 }};
 
 /// A sheet's pixels: the game's texture as the renderer decodes it, or a texture pack's
@@ -151,7 +160,9 @@ inline const std::vector<float>& LetterStrokes(char c) {
 /// button bound to it, by control (A, B, X, Y, L, R, ZL, ZR, Start, Select), and a pad's own
 /// buttons by role (`PadRole`). nullptr: the 3DS names.
 enum Control : u32 { CA, CB, CX, CY, CL, CR, CZL, CZR, CStart, CSelect };
-enum PadRole : u32 { PadSouth, PadEast, PadWest, PadNorth, PadL1, PadR1, PadL3, PadBack, PadStick, PadDpad };
+/// PadChoose and PadCancel: the buttons that choose and go back in menus (msr-native: the bottom and right ones, the
+/// right and bottom ones on a Nintendo pad).
+enum PadRole : u32 { PadSouth, PadEast, PadWest, PadNorth, PadL1, PadR1, PadL3, PadBack, PadStick, PadDpad, PadChoose, PadCancel };
 /// The keyboard's own roles, asked of key_name past the controls (msr-native: from its bindings): the circle pad's
 /// keys, moving in touch mode, touch mode's key, its finger and its exit.
 enum KeyRole : u32 { KeyStick = 100, KeyMove, KeyTouch, KeyTap, KeyLeave };
@@ -168,6 +179,9 @@ void ForEachRow(const Sheet& sheet, const Image& image, Copy&& copy) {
     const std::size_t row_bytes = std::size_t{size} * image.bpp;
     for (u32 face = 0; face < FaceCount; ++face) {
         const Cell& cell = sheet.cells[face];
+        if (!Has(cell)) {
+            continue;
+        }
         for (u32 y = 0; y < size; ++y) {
             const std::size_t row = image.height - 1 - (cell.y * scale + y);
             copy(face, image.pixels + (row * image.width + cell.x * scale) * image.bpp,
@@ -195,10 +209,11 @@ inline Icons Read(const Sheet& sheet, const Image& image) {
     return icons;
 }
 
-/// Draws in each face's cell the icon `mapping` shows for it.
+/// Draws in each face's cell the icon `mapping` shows for it (its own where the sheet lacks that one).
 inline void Write(const Sheet& sheet, const Image& image, const Icons& icons, u32 mapping) {
     ForEachRow(sheet, image, [&](u32 face, u8* row, std::size_t offset, std::size_t bytes) {
-        std::memcpy(row, icons[Shown(mapping, face)].data() + offset, bytes);
+        const u32 shown_face = Shown(mapping, face);
+        std::memcpy(row, icons[Has(sheet.cells[shown_face]) ? shown_face : face].data() + offset, bytes);
     });
 }
 
@@ -308,7 +323,7 @@ inline void WriteShoulders(const Sheet& sheet, const Image& image, u32 keys) {
     const u32 scale = image.width / sheet.width, w = ShoulderWidth * scale, h = ShoulderHeight * scale;
     for (u32 i = 0; i < ShoulderCount; ++i) {
         const char letter = LetterOf(keys, i);
-        if (LetterStrokes(letter).empty()) {
+        if (LetterStrokes(letter).empty() || !Has(sheet.shoulders[i])) {
             continue;
         }
         // the cell top row first (the image's rows run bottom first)
@@ -339,7 +354,7 @@ inline void WriteSymbols(const Sheet& sheet, const Image& image, const Icons& ic
     for (u32 face = 0; face < FaceCount; ++face) {
         const u32 symbol = SymbolOf(all, face);
         const char letter = LetterOf(keys, face);
-        if (!symbol && LetterStrokes(letter).empty()) {
+        if ((!symbol && LetterStrokes(letter).empty()) || !Has(sheet.cells[face])) {
             continue;
         }
         // the cell's top row in the image (rows bottom first): rows then run down by -row_bytes
@@ -426,13 +441,13 @@ inline std::string Keys(std::string_view text) {
             if (t == "Close") return "F1";
             return std::string(t);
         }
-        // the game's layout: choosing and touch mode's finger on the right face button, leaving and
-        // backing out on the bottom one
+        // choosing and touch mode's finger on the menus' choosing button, leaving and backing out on
+        // their back button (msr-native: the bottom and right ones, Nintendo pads the game's layout)
         if (t == "Touch") return role(PadL3);
         if (t == "Stick") return role(PadStick);
         if (t == "Move") return std::string(role(PadDpad)) + " / " + role(PadStick);
-        if (t == "Tap" || t == "Choose") return role(PadEast);
-        if (t == "Leave" || t == "Back") return role(PadSouth);
+        if (t == "Tap" || t == "Choose") return role(PadChoose);
+        if (t == "Leave" || t == "Back") return role(PadCancel);
         if (t == "Tabs") return std::string(role(PadL1)) + " / " + role(PadR1);
         if (t == "Close") return std::string(pad(CSelect)) + " or F1";
         if (t == "Beams") return pad(CZR);

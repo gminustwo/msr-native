@@ -254,7 +254,8 @@ Overlay::Overlay() {
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard | ImGuiConfigFlags_NavEnableGamepad;
     io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
     // The game's layout, Nintendo's: its A is the right face button (Xbox B) and chooses, its B
-    // the bottom one (Xbox A) and goes back.
+    // the bottom one (Xbox A) and goes back. msr-native gives the pad's choosing button as the
+    // right one (overlay_host.cpp PadKeyOf: an Xbox or PlayStation pad chooses with the bottom one).
     io.ConfigNavSwapGamepadButtons = true;
     io.ConfigNavCursorVisibleAuto = true;
     ApplyStyle();
@@ -668,6 +669,11 @@ void Overlay::DrawControls(float scale, float label_width,
             ButtonGlyphs::Keys("Settings: {Close}        Fullscreen: F11"),
             ButtonGlyphs::Keys("Touch navigation: {Touch} in menus"),
         };
+        // a pad chooses and goes back in menus with its own layout's buttons (msr/glyphs.cpp), whatever A and B do in play
+        const u32 dev = ButtonGlyphs::device.load();
+        if (dev == ButtonGlyphs::Xbox || dev == ButtonGlyphs::PlayStation || dev == ButtonGlyphs::Nintendo) {
+            reference.push_back(ButtonGlyphs::Keys("In menus: {Choose} chooses, {Back} goes back (the rows above are for play)"));
+        }
     } else {
         reference = {
             "Beams: ZR (right trigger)        Morph Ball: ZL (left trigger)",

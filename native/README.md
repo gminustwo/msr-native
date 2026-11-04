@@ -26,7 +26,8 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   `user/msr/settings.ini`, or `../msr/settings.ini` from `user/native`). Its frame rate applies unless `--fps` says.
 - The single 16:9 screen (`--layout=single`, F9 cycles to it): `compositor.cpp` ports the emulator build's compositor
   (renderer_vulkan.cpp DrawMsrScreens): the bottom screen is classified each frame (`bottom_classifier.h`) and its HUD
-  pieces (energy, beam slots, the minimap following Samus, the counters), menus (a panel, the title menus without
+  pieces (energy, beam slots, the minimap following Samus's marker: by its deep red, so a red map pin is not taken
+  for it, and taken far from its last place only once it holds there 0.75 s; the counters), menus (a panel, the title menus without
   their backdrop), prompts and the gallery layout are drawn over the view by `msr.vert`/`msr.frag`. `pica_vk.c`
   squeezes the top screen's world draws to 16:9 and applies the camera zoom in clip space, and leaves out the title
   menus' backdrop quads. The mouse touches the panel while it shows.
@@ -39,10 +40,23 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   Steam's virtual pads, and pads SDL cannot name) shows the game's letter icons as Xbox labels those buttons, a
   PlayStation pad its symbols (drawn into the icons as the game cuts its letters), a Nintendo pad the game's own, the
   keyboard the letter or digit of the key bound to each (the space bar's sign for Space, the game's icon where the
-  key's name is longer). The icons are redrawn in the game's two icon textures as `pica_vk.c` uploads them (a texture
-  pack's too; uploaded again when the device changes). The control reminders beside the menus, the Controls tab's
+  key's name is longer). The icons are redrawn in the game's three icon textures as `pica_vk.c` uploads them (the font
+  sheet, the interface atlas and the top screen's atlas with the dialogs' A and B; a texture pack's too; uploaded again
+  when the device changes; `PWR_MSR_TRACE=1` lists the hashes of textures of a sheet's size that are not it). The control reminders beside the menus, the Controls tab's
   reference and the settings' footer name the same buttons (the keys by name, the circle pad's and touch navigation's
   from the bindings). `MSR_BUTTON_ICONS=xbox|playstation|nintendo|keyboard` forces one.
+- Choosing and going back (2026-11-03): an Xbox or PlayStation pad chooses with its bottom face button (A, Cross:
+  3DS A) and goes back with its right one (B, Circle: 3DS B) in the game's menus, its dialogs over play ("Save your
+  progress?"), touch navigation and the settings, while in play the bottom button stays B (jump) and the right one A,
+  as bound (`input.c` input_pad_bound, the menus' layout). The layout applies unless the HUD shows: from the
+  classifier's Menu at once, from anything else once held 300 ms (a dialog over play shows the emblem below, as
+  cutscenes and loading do; `compositor.cpp` msr_buttons_state). A button keeps the 3DS button it pressed until it
+  comes up, so the button that chose Continue does not jump. The reminders follow, and the icons: the bottom screen's
+  and text's from a Menu or a Prompt held 300 ms until the HUD shows (the menus' check mark shows A or Cross there; a
+  dialog over play keeps play's, as its text names play's buttons), the dialogs' "A check mark" and "B cross" always.
+  A Nintendo pad keeps the game's layout, which its labels already match; SDL is asked for every pad's buttons by
+  position (SDL 2 gave a Nintendo pad's by label, so its A came as the bottom button). `PWR_MSR_TRACE=1` logs the
+  layouts changing.
 - Mouse aiming (`video.c`, `input.c`): in play the left button shoots (3DS Y; on the bottom screen it still touches)
   and the right one held is Free Aim (3DS L) with the circle pad all the way toward the pointer from Samus: her
   entity's position (Samus's handle at the game +0xFC, then +0xFC..+0x104, about her arm cannon's height) seen by the
@@ -50,7 +64,7 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   pointer is a crosshair over the top screen in play and hides while a pad is in use until the mouse moves.
 - Touch navigation (`src/msr/touch_nav.cpp`, compiled in as it is): T, or the pad's L3 while a menu shows, puts
   a highlight on the touch screen's buttons (a free cursor where none are known); the D-pad, the circle pad's keys,
-  arrows or left stick move it, the right face button, A's key or Return touches (hold to drag), the bottom face
+  arrows or left stick move it, the pad's choosing button (above), A's key or Return touches (hold to drag), its back
   button, B's key or Escape leaves.
   The panel shows meanwhile and the game gets no other input. The classifier's page is published only once it has
   held for 3 frames and 80 ms, like its state: menus sliding in read as no page for a few frames.
@@ -215,8 +229,9 @@ Keyboard, mouse and gamepad (`runtime/input.c`, rebindable in the menu's Control
 2026-11-03): WASD = circle pad (arrows too), Space = B (jump), F = A (Aeion, confirm; Enter too), R = X (melee
 counter), V = Y (shoot), Q/E = L/R, Left Shift = ZL (Morph Ball), C = ZR (the next beam), Tab = Start, Backspace =
 Select (the menu), 1/2/3/4 = D-pad up/left/right/down (the Aeion abilities), T = touch navigation; in play the mouse's
-left button shoots, the right one held aims at the pointer and the wheel changes beams; the pad by position. F1 opens
-the menu, F5 quick saves, F8 quick loads, F9 switches the screen layout, F11 fullscreen.
+left button shoots, the right one held aims at the pointer and the wheel changes beams; the pad by position in play
+(bottom = B, jump; right = A), and in menus and dialogs an Xbox or PlayStation pad's bottom button chooses and its
+right one goes back. F1 opens the menu, F5 quick saves, F8 quick loads, F9 switches the screen layout, F11 fullscreen.
 
 Debugging switches (environment, as in Woohoo! Flight School): `PWR_SKIP=<first>-<last>` (drop those draws of every
 frame, counted from each top-screen swap: bisects an artifact to its draws; with `PWR_SKIP_DUMP=<frame>` it prints their

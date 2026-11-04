@@ -24,8 +24,10 @@ static KObject *shmem, *pad_event;
 static uint32_t keys, prev_buttons;          /* digital buttons from keys */
 static int stick_l, stick_r, stick_u, stick_d;   /* the circle pad from keys: bit 0 its bound keys, bit 1 the arrows */
 static int touch_down, touch_x, touch_y;
-static uint32_t pad_keys;                    /* digital buttons from a gamepad */
+static uint32_t pad_keys;                    /* digital buttons from a gamepad: what its held buttons pressed (pad_recount) */
 static int pad_cl, pad_cr, pad_cu, pad_cd;   /* the circle pad from pad buttons bound to it */
+static unsigned char pad_held[SDL_CONTROLLER_BUTTON_MAX];   /* each held pad button's control + 1 as at its press (0: none) */
+static uint32_t raw_held[12];                /* each held raw joystick button's 3DS bit as at its press */
 static int pad_x, pad_y;                     /* gamepad stick, -32768..32767 */
 static int mouse_fire, mouse_aim;            /* the mouse in play (video.c): Y, and L with the circle pad toward aim_x/y */
 static float aim_x, aim_y;
@@ -39,11 +41,11 @@ void input_bind(KObject *mem, KObject *pad0) { pthread_mutex_lock(&I); shmem = m
  * circle pad, Space = B (jump), Q/E = L/R, Left Shift = ZL (Morph Ball), C = ZR (the next beam), Tab = Start,
  * Backspace = Select (the settings); F = A (Aeion, confirm), R = X (melee counter), V = Y (shoot; the mouse too),
  * 1/2/3/4 = D-pad up/left/right/down (the Aeion abilities in the order the game gives them). Arrows are the circle pad
- * too and Enter is A where they are not bound. The pad by position (east = A, south = B, north = X, west = Y), its
- * triggers ZL and ZR, its left stick the circle pad. The left mouse button on the bottom screen touches; in play the
- * left button elsewhere shoots, the right one aims and the wheel changes beams (video.c). ZL and ZR are the triggers'
- * taps (Morph Ball, next beam: msr_trigger); Select opens the settings (the game takes Select as Start), unless
- * video.c's select_layout says otherwise. */
+ * too and Enter is A where they are not bound. The pad by position (east = A, south = B, north = X, west = Y) in play,
+ * the menus' layout below in menus and dialogs, its triggers ZL and ZR, its left stick the circle pad. The left mouse
+ * button on the bottom screen touches; in play the left button elsewhere shoots, the right one aims and the wheel
+ * changes beams (video.c). ZL and ZR are the triggers' taps (Morph Ball, next beam: msr_trigger); Select opens the settings (the game
+ * takes Select as Start), unless video.c's select_layout says otherwise. */
 static const char *const ctrl_label[C_COUNT] = { "A", "B", "X", "Y", "L", "R", "ZL", "ZR", "Start", "Select (settings)",
                                                  "D-pad up", "D-pad down", "D-pad left", "D-pad right",
                                                  "Circle Pad up", "Circle Pad down", "Circle Pad left", "Circle Pad right" };
@@ -67,6 +69,25 @@ void input_default_pad(void) { memcpy(pad_bind, pad_default, sizeof pad_bind); }
 /* the control a key or pad button is bound to, or -1 */
 int input_key_control(int sym) { for (int c = 0; c < C_COUNT; c++) if (key_bind[c] == sym) return c; return -1; }
 int input_pad_control(int button) { for (int c = 0; c < C_COUNT; c++) if (pad_bind[c] == button) return c; return -1; }
+/* The menus' layout (2026-11-03, the user: "I want A to mean select/accept and B to mean back, regardless of controller
+   type (so X on PS and O for back). but then in game the controls stay that the bottom button remains jump and the east
+   buttons remains the action it was"; then "in game it also needs to change too": the dialogs over play): unless the
+   HUD shows, if the pad is not a Nintendo one (msr_menu_buttons, glyphs.cpp; a Nintendo pad's labels already are the
+   game's layout), the bottom face button is 3DS A (choose) and the right one 3DS B (back), whatever they do in play;
+   the buttons bound to A and B for play do nothing there. A button keeps what it pressed until it comes up
+   (pad_held), so a menu closing under it does not make it another button. */
+int input_pad_bound(int c, int menu) {
+    if (c < 0 || c >= C_COUNT) return -1;
+    if (menu && (c == C_A || c == C_B)) return c == C_A ? SDL_CONTROLLER_BUTTON_A : SDL_CONTROLLER_BUTTON_B;
+    const int b = pad_bind[c];
+    return menu && (b == SDL_CONTROLLER_BUTTON_A || b == SDL_CONTROLLER_BUTTON_B) ? -1 : b;
+}
+int input_pad_control_now(int button) {
+    const int menu = msr_menu_buttons();
+    if (menu && (button == SDL_CONTROLLER_BUTTON_A || button == SDL_CONTROLLER_BUTTON_B)) return button == SDL_CONTROLLER_BUTTON_A ? C_A : C_B;
+    const int c = input_pad_control(button);
+    return menu && (c == C_A || c == C_B) ? -1 : c;
+}
 /* "Key X, Gamepad B" */
 static const char *pad_name(int b) {
     switch (b) {
@@ -123,29 +144,39 @@ void input_key(int sym, int down) {
     }
     pthread_mutex_unlock(&I);
 }
-/* a gamepad button through the bindings (controllers with an SDL mapping) */
-void input_pad_sdl(int button, int down) {
-    uint32_t b = 0;
-    int c = input_pad_control(button);
-    if (c >= C_CUP) {   /* a pad button bound to the circle pad */
-        pthread_mutex_lock(&I);
-        *(c == C_CUP ? &pad_cu : c == C_CDOWN ? &pad_cd : c == C_CLEFT ? &pad_cl : &pad_cr) = down;
-        pthread_mutex_unlock(&I);
-        return;
+/* under I: the pad's buttons and its circle pad from what each held button pressed */
+static void pad_recount(void) {
+    pad_keys = 0; pad_cu = pad_cd = pad_cl = pad_cr = 0;
+    for (int b = 0; b < SDL_CONTROLLER_BUTTON_MAX; b++) {
+        const int c = pad_held[b] - 1;
+        if (c == C_CUP) pad_cu = 1; else if (c == C_CDOWN) pad_cd = 1; else if (c == C_CLEFT) pad_cl = 1; else if (c == C_CRIGHT) pad_cr = 1;
+        else if (c >= 0) pad_keys |= ctrl_bit[c];
     }
-    for (c = 0; c < C_COUNT; c++) if (pad_bind[c] == button) b |= ctrl_bit[c];
-    if (!b) return;
+    for (int b = 0; b < 12; b++) pad_keys |= raw_held[b];
+}
+/* a gamepad button through the bindings (controllers with an SDL mapping), the menus' layout in menus */
+void input_pad_sdl(int button, int down) {
+    if (button < 0 || button >= SDL_CONTROLLER_BUTTON_MAX) return;
+    const int c = down ? input_pad_control_now(button) : -1;
     pthread_mutex_lock(&I);
-    pad_keys = down ? pad_keys | b : pad_keys & ~b;
+    pad_held[button] = (unsigned char)(c + 1);
+    pad_recount();
     pthread_mutex_unlock(&I);
 }
-/* raw joysticks (no SDL mapping, video.c): positional layout, south = 3DS B, east = A, west = Y, north = X */
+/* raw joysticks (no SDL mapping, video.c): positional layout, south = 3DS B, east = A, west = Y, north = X; in menus
+   south = A and east = B, as the mapped pads */
 void input_pad_button(int b, int down) {
     static const uint32_t map[12] = { B_B, B_A, B_Y, B_X, B_L, B_R, B_SELECT, B_START, B_UP, B_DOWN, B_LEFT, B_RIGHT };
     if (b < 0 || b >= 12) return;
+    const uint32_t bit = b < 2 && down && msr_menu_buttons() ? (b == 0 ? B_A : B_B) : map[b];
     pthread_mutex_lock(&I);
-    pad_keys = down ? pad_keys | map[b] : pad_keys & ~map[b];
+    raw_held[b] = down ? bit : 0;
+    pad_recount();
     pthread_mutex_unlock(&I);
+}
+/* the pad in use went away: none of its buttons stay held */
+void input_pad_release(void) {
+    pthread_mutex_lock(&I); memset(pad_held, 0, sizeof pad_held); memset(raw_held, 0, sizeof raw_held); pad_recount(); pthread_mutex_unlock(&I);
 }
 
 void input_pad_stick(int x, int y) { pthread_mutex_lock(&I); pad_x = x; pad_y = y; pthread_mutex_unlock(&I); }
@@ -166,6 +197,7 @@ void input_touch(int down, int x, int y) {
 
 void input_release_all(void) {
     pthread_mutex_lock(&I); keys = pad_keys = 0; stick_l = stick_r = stick_u = stick_d = 0; pad_cl = pad_cr = pad_cu = pad_cd = 0;
+    memset(pad_held, 0, sizeof pad_held); memset(raw_held, 0, sizeof raw_held);
     pad_x = pad_y = 0; touch_down = 0;
     mouse_fire = mouse_aim = 0; pthread_mutex_unlock(&I);
 }

@@ -172,7 +172,12 @@ ImGuiKey KeyOf(SDL_Keycode k) {
 }
 
 ImGuiKey PadKeyOf(int button) {
-    // SDL names the face buttons by position (A = bottom), as ImGui does
+    // SDL names the face buttons by position (A = bottom; video.c asks it to for Nintendo pads too), as ImGui does.
+    // overlay.cpp has ImGui choose with the right face button (ConfigNavSwapGamepadButtons, the game's layout): the
+    // pad's choosing button (glyphs.cpp msr_pad_choose: the bottom one, the right one on a Nintendo pad) is given as it.
+    const int choose = msr_pad_choose();
+    if (button == choose) return ImGuiKey_GamepadFaceRight;
+    if (button == (choose == SDL_CONTROLLER_BUTTON_A ? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A)) return ImGuiKey_GamepadFaceDown;
     switch (button) {
     case SDL_CONTROLLER_BUTTON_A: return ImGuiKey_GamepadFaceDown;
     case SDL_CONTROLLER_BUTTON_B: return ImGuiKey_GamepadFaceRight;
