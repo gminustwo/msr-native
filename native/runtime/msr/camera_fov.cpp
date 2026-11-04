@@ -171,7 +171,7 @@ extern "C" void msr_camera_frame(double now) {
     }
 
     // the gain wanted: the zoomed view's widest axis over the game's, in play
-    const float ws = P::widescreen.load(std::memory_order_relaxed) ? P::WideScale : 1.f;
+    const float ws = P::widescreen.load(std::memory_order_relaxed) ? P::ViewScale() : 1.f;   // 15/16 at 16:9, 15/32 at 32:9
     const float zoom = P::world_zoom.load(std::memory_order_relaxed);
     const float want = at && msr_world_in_play() ? std::fmax(1.f, 1.f / (ws * zoom)) : 1.f;
     cam.eased += (want - cam.eased) * (1.f - std::exp(-8.f * seconds));

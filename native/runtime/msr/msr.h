@@ -39,8 +39,11 @@ uint64_t msr_romfs_size(void);
 size_t   msr_romfs_read(uint64_t offset, size_t length, uint8_t *out);
 
 /* Rewrites the game's instructions for the extras that are on (src/msr/cheats.h Patches: galleries, Fusion Mode, the
-   Fusion suit), after .code is in memory. The recompiled code hands each rewritten word to interp.c. */
+   Fusion suit, Hard Mode), after .code is in memory. The recompiled code hands each rewritten word to interp.c. */
 void msr_apply_patches(void);
+/* Once the native code is loaded: the functions holding the words it does not check (patches added since players
+   built theirs) run on the interpreter. */
+void msr_patches_module_loaded(void);
 
 /* ---- the single 16:9 screen (compositor.cpp; the emulator-based build's DrawMsrScreens) ---- */
 /* One quad over the view, in window (drawable) pixels: a region of the bottom screen (style[3] = mode 0 plain,
@@ -89,6 +92,11 @@ void msr_input_bindings_changed(void);
 void msr_buttons_state(int input, int icons);
 int msr_menu_buttons(void);
 int msr_pad_choose(void);
+int msr_pad_back(void);   /* the SDL button that goes back there */
+/* The Controls tab's Nintendo menu layout (off by default): no menus' layout for any pad; menus choose with the button
+   bound to the game's A and go back with the one bound to its B */
+void msr_set_menu_confirm_right(int on);
+int msr_menu_confirm_right(void);
 int msr_glyph_sheet(const uint8_t *level0, uint32_t w, uint32_t h, int fmt);   /* pica_vk.c: one of the face-button icon sheets (1, 2) or 0 */
 void msr_glyph_patch(int sheet, uint8_t *rgba, uint32_t w, uint32_t h);
 unsigned msr_glyph_version(void);

@@ -157,6 +157,7 @@ float NoteHeight(const char* text) {
 void PlayerSettings::Load(const QString& path) {
     QSettings file(path, QSettings::IniFormat);
     widescreen = file.value(QStringLiteral("widescreen"), widescreen).toBool();
+    ultrawide = file.value(QStringLiteral("ultrawide"), ultrawide).toBool();
     camera_zoom = std::clamp(file.value(QStringLiteral("camera_zoom"), camera_zoom).toFloat(),
                              CameraZoomMin, CameraZoomMax);
     hud_scale = file.value(QStringLiteral("hud_scale"), hud_scale).toFloat();
@@ -166,6 +167,7 @@ void PlayerSettings::Load(const QString& path) {
     minimap_opacity = file.value(QStringLiteral("minimap_opacity"), minimap_opacity).toFloat();
     show_counters = file.value(QStringLiteral("show_counters"), show_counters).toBool();
     show_abilities = file.value(QStringLiteral("show_abilities"), show_abilities).toBool();
+    hud_within_16_9 = file.value(QStringLiteral("hud_within_16_9"), hud_within_16_9).toBool();
     panel_scale = file.value(QStringLiteral("panel_scale"), panel_scale).toFloat();
     menu_backdrop = file.value(QStringLiteral("menu_backdrop"), menu_backdrop).toFloat();
     control_hints = file.value(QStringLiteral("control_hints"), control_hints).toBool();
@@ -183,6 +185,7 @@ void PlayerSettings::Load(const QString& path) {
     unlock_galleries = file.value(QStringLiteral("unlock_galleries"), unlock_galleries).toBool();
     unlock_fusion_mode =
         file.value(QStringLiteral("unlock_fusion_mode"), unlock_fusion_mode).toBool();
+    unlock_hard_mode = file.value(QStringLiteral("unlock_hard_mode"), unlock_hard_mode).toBool();
     fusion_suit = file.value(QStringLiteral("fusion_suit"), fusion_suit).toBool();
     infinite_energy = file.value(QStringLiteral("infinite_energy"), infinite_energy).toBool();
     infinite_missiles = file.value(QStringLiteral("infinite_missiles"), infinite_missiles).toBool();
@@ -192,6 +195,7 @@ void PlayerSettings::Load(const QString& path) {
 void PlayerSettings::Save(const QString& path) const {
     QSettings file(path, QSettings::IniFormat);
     file.setValue(QStringLiteral("widescreen"), widescreen);
+    file.setValue(QStringLiteral("ultrawide"), ultrawide);
     file.setValue(QStringLiteral("camera_zoom"), camera_zoom);
     file.setValue(QStringLiteral("hud_scale"), hud_scale);
     file.setValue(QStringLiteral("hud_opacity"), hud_opacity);
@@ -200,6 +204,7 @@ void PlayerSettings::Save(const QString& path) const {
     file.setValue(QStringLiteral("minimap_opacity"), minimap_opacity);
     file.setValue(QStringLiteral("show_counters"), show_counters);
     file.setValue(QStringLiteral("show_abilities"), show_abilities);
+    file.setValue(QStringLiteral("hud_within_16_9"), hud_within_16_9);
     file.setValue(QStringLiteral("panel_scale"), panel_scale);
     file.setValue(QStringLiteral("menu_backdrop"), menu_backdrop);
     file.setValue(QStringLiteral("control_hints"), control_hints);
@@ -212,6 +217,7 @@ void PlayerSettings::Save(const QString& path) const {
     file.setValue(QStringLiteral("hdr_paper"), hdr_paper);
     file.setValue(QStringLiteral("unlock_galleries"), unlock_galleries);
     file.setValue(QStringLiteral("unlock_fusion_mode"), unlock_fusion_mode);
+    file.setValue(QStringLiteral("unlock_hard_mode"), unlock_hard_mode);
     file.setValue(QStringLiteral("fusion_suit"), fusion_suit);
     file.setValue(QStringLiteral("infinite_energy"), infinite_energy);
     file.setValue(QStringLiteral("infinite_missiles"), infinite_missiles);
@@ -222,6 +228,7 @@ void PlayerSettings::Save(const QString& path) const {
 void PlayerSettings::Publish() const {
     namespace P = Presentation;
     P::widescreen = widescreen;
+    P::ultrawide = ultrawide;
     P::zoom = camera_zoom;
     P::hud_scale = hud_scale;
     P::hud_opacity = hud_opacity;
@@ -230,6 +237,7 @@ void PlayerSettings::Publish() const {
     P::minimap_opacity = minimap_opacity;
     P::show_counters = show_counters;
     P::show_abilities = show_abilities;
+    P::hud_within_16_9 = hud_within_16_9;
     P::panel_scale = panel_scale;
     P::menu_backdrop = menu_backdrop;
     P::bloom = bloom;
@@ -239,6 +247,7 @@ void PlayerSettings::Publish() const {
     FrameRate::target = frame_rate;
     Cheats::enabled = (unlock_galleries ? Cheats::Galleries : 0u) |
                       (unlock_fusion_mode ? Cheats::FusionMode : 0u) |
+                      (unlock_hard_mode ? Cheats::HardMode : 0u) |
                       (fusion_suit ? Cheats::FusionSuit : 0u) |
                       (infinite_energy ? Cheats::InfiniteEnergy : 0u) |
                       (infinite_missiles ? Cheats::InfiniteMissiles : 0u) |
@@ -665,6 +674,14 @@ void Overlay::DrawControls(float scale, float label_width,
             Act(OverlayAction::Kind::RightStickDpad, on ? 1 : 0);
         }
     }
+    // msr-native: menus choose with the game's A as bound below (on: the 3DS's layout, A on the right), not with A /
+    // Cross, the bottom button (off, the default)
+    if (snapshot.menu_layout_option) {
+        bool on = snapshot.menu_confirm_right;
+        if (ImGui::Checkbox("Nintendo menu layout (the game's A confirms, as bound below)", &on)) {
+            Act(OverlayAction::Kind::MenuConfirmRight, on ? 1 : 0);
+        }
+    }
 
     // The bindings scroll in their own region; the reference stays below them. msr-native names
     // the keys or buttons of the device in use (ButtonGlyphs::Keys) and aims with the mouse (video.c).
@@ -680,7 +697,9 @@ void Overlay::DrawControls(float scale, float label_width,
         // a pad chooses and goes back in menus with its own layout's buttons (msr/glyphs.cpp), whatever A and B do in play
         const u32 dev = ButtonGlyphs::device.load();
         if (dev == ButtonGlyphs::Xbox || dev == ButtonGlyphs::PlayStation || dev == ButtonGlyphs::Nintendo) {
-            reference.push_back(ButtonGlyphs::Keys("In menus: {Choose} chooses, {Back} goes back (the rows above are for play)"));
+            reference.push_back(ButtonGlyphs::Keys(snapshot.menu_confirm_right
+                ? "In menus: {Choose} chooses, {Back} goes back"
+                : "In menus: {Choose} chooses, {Back} goes back (the rows above are for play)"));
         }
         if (snapshot.right_stick_dpad) {
             reference.push_back("Aeion abilities: the right stick        The D-pad moves, as the left stick");
@@ -966,6 +985,9 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             player_changed |= ImGui::Checkbox("##galleries", &p.unlock_galleries);
             row("Unlock Fusion Mode");
             player_changed |= ImGui::Checkbox("##fusionmode", &p.unlock_fusion_mode);
+            row("Hard Mode from the start");
+            player_changed |= ImGui::Checkbox("##hardmode", &p.unlock_hard_mode);
+            Note("A new file and every New Game offer Normal and Hard (Fusion too).");
             row("Fusion suit, any difficulty");
             if (Cheats::randomizer.load(std::memory_order_relaxed)) {
                 // The randomizer has its own Fusion suit option (msr/cheats.h): kept off.
@@ -973,10 +995,10 @@ void Overlay::DrawMenu(float scale, bool appearing) {
                 ImGui::BeginDisabled();
                 ImGui::Checkbox("##fusionsuit", &off);
                 ImGui::EndDisabled();
-                Note("Off with the randomizer. Fusion Mode: a save's New Game.");
+                Note("Off with the randomizer. Fusion Mode: chosen when a game starts.");
             } else {
                 player_changed |= ImGui::Checkbox("##fusionsuit", &p.fusion_suit);
-                Note("Fusion Mode: a save's New Game. The suit switches at once.");
+                Note("Fusion Mode: chosen when a game starts. The suit switches at once.");
             }
             ImGui::Spacing();
             const ImVec2 button{-FLT_MIN, 0.f};
@@ -1036,6 +1058,13 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             }
             row("Widescreen (16:9)");
             player_changed |= ImGui::Checkbox("##widescreen", &p.widescreen);
+            if (e.ultrawide_option) {
+                row("Ultrawide (up to 32:9)");
+                ImGui::BeginDisabled(!p.widescreen);
+                player_changed |= ImGui::Checkbox("##ultrawide", &p.ultrawide);
+                ImGui::EndDisabled();
+                Note("In play, a window wider than 16:9 shows more of the level.");
+            }
             row("Camera zoom");
             player_changed |= ImGui::SliderFloat("##zoom", &p.camera_zoom, CameraZoomMin,
                                                  CameraZoomMax, "%.2f");
@@ -1117,6 +1146,11 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             player_changed |= ImGui::Checkbox("##counters", &p.show_counters);
             row("Aeion abilities");
             player_changed |= ImGui::Checkbox("##abilities", &p.show_abilities);
+            if (e.ultrawide_option) {
+                row("HUD within 16:9");
+                player_changed |= ImGui::Checkbox("##hud169", &p.hud_within_16_9);
+                Note("On an ultrawide screen, the HUD nearer the middle.");
+            }
             row("Menu panel size");
             player_changed |= ImGui::SliderFloat("##panel", &p.panel_scale, .5f, 1.f, "%.2f");
             row("Title menu background");
@@ -1166,7 +1200,8 @@ void Overlay::DrawMenu(float scale, bool appearing) {
         emulator = e;
     }
     if (player_changed) {
-        PlayerChanged(p.widescreen != before.widescreen || p.panel_scale != before.panel_scale);
+        PlayerChanged(p.widescreen != before.widescreen || p.ultrawide != before.ultrawide ||
+                      p.panel_scale != before.panel_scale);
         if (p.frame_rate != before.frame_rate) {
             Act(OverlayAction::Kind::FrameRate);
         }
@@ -1249,7 +1284,7 @@ void Overlay::DrawLauncher(const LauncherSnapshot& l, float label_width,
     Label("Game file", label_width);
     const float browse = l.can_browse ? ImGui::CalcTextSize("Browse...").x + style.FramePadding.x * 2.f : 0.f;
     ImGui::SetNextItemWidth(l.can_browse ? -(browse + style.ItemSpacing.x) : -FLT_MIN);
-    ImGui::InputTextWithHint("##game", "Samus Returns (USA), a decrypted .3ds, .cci or .cxi", game_input.data(),
+    ImGui::InputTextWithHint("##game", "Samus Returns (USA), a decrypted .3ds, .cci, .cxi or .zcci", game_input.data(),
                              game_input.size());
     if (ImGui::IsItemDeactivatedAfterEdit()) {
         Act(OverlayAction::Kind::LauncherGame, 0, game_input.data());

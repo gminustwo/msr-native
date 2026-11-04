@@ -11,6 +11,10 @@
 // when): the names follow. The icons follow it in menus (the bottom screen's and text's: the menus' check mark shows
 // A or Cross there and B or Circle in play), not in the dialogs over play, whose text names play's buttons ("Press Ⓐ"
 // for an Aeion ability); the dialogs' own "Ⓐ ✔" and "Ⓑ ✖" (the top screen's atlas, only used there) always show it.
+// The Controls tab's Nintendo menu layout (2026-11-03, msr2ds issue 1: "whatever you mapped A to is presented as A
+// both in-game and on the overlay, and has the typical function of the A button"; off by default) turns the menus'
+// layout off for every pad: menus, dialogs, touch mode and the settings choose with the button bound to the game's A
+// and go back with the one bound to its B, and the icons and names say so.
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
@@ -33,6 +37,8 @@ u32 device_type = SDL_CONTROLLER_TYPE_UNKNOWN;   // the pad's, when the device i
 // compositor.cpp (msr_buttons_state): the pad's buttons follow the menus' layout (anything but the HUD), the icons do
 // (a menu shows); the game starts in its menus
 std::atomic<bool> menu_input{true}, menu_icons{true};
+// the Controls tab's Nintendo menu layout (overlay_host.cpp, settings.ini [native_controls] menu_confirm_right)
+std::atomic<bool> confirm_right{false};
 // the top screen's atlas (Sheets[2], the dialogs' A and B): its faces always in the menus' layout
 std::atomic<u32> dialog_shown{G::Identity}, dialog_symbols{0};
 constexpr int DialogSheet = 3;
@@ -61,13 +67,30 @@ u32 PadFamily() {
     const u32 f = Forced();
     return f == G::Xbox || f == G::PlayStation || f == G::Nintendo ? f : DeviceOf(static_cast<int>(device_type));
 }
-// the menus' layout applies to a pad of this family now: its buttons (input), its icons (a Nintendo pad's labels
-// already are the game's layout)
+// a pad of this family takes the menus' layout (not a Nintendo pad, whose labels already are the game's layout; not
+// with the Nintendo menu layout), and now: its buttons (input), its icons
+bool MenusLayoutFor(u32 family) { return family != G::Nintendo && !confirm_right.load(std::memory_order_relaxed); }
 bool MenuLayout(u32 family, bool icons = false) {
-    return family != G::Nintendo && (icons ? menu_icons : menu_input).load(std::memory_order_relaxed);
+    return MenusLayoutFor(family) && (icons ? menu_icons : menu_input).load(std::memory_order_relaxed);
 }
-// the button that chooses in menus, touch mode and the settings: the bottom one, the right one (A) on a Nintendo pad
-int ChooseButton(u32 family) { return family == G::Nintendo ? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A; }
+// the buttons that choose and go back in menus, touch mode and the settings: the bottom and right ones (a Nintendo
+// pad's right and bottom ones); with the Nintendo menu layout, the face buttons bound to the game's A and B
+bool Face(int b) { return b >= SDL_CONTROLLER_BUTTON_A && b <= SDL_CONTROLLER_BUTTON_Y; }
+int ChooseButton(u32 family) {
+    if (confirm_right.load(std::memory_order_relaxed)) {
+        const int a = input_pad_binds()[C_A];
+        return Face(a) ? a : SDL_CONTROLLER_BUTTON_B;
+    }
+    return family == G::Nintendo ? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A;
+}
+int BackButton(u32 family) {
+    const int choose = ChooseButton(family);
+    if (confirm_right.load(std::memory_order_relaxed)) {
+        const int b = input_pad_binds()[C_B];
+        if (Face(b) && b != choose) return b;
+    }
+    return choose == SDL_CONTROLLER_BUTTON_A ? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A;
+}
 
 // a pad button's label on the device in use (SDL maps buttons by position: A south, B east, X west, Y north)
 const char* Label(int button) {
@@ -91,10 +114,10 @@ const char* PadName(u32 control) {
 }
 
 const char* RoleName(u32 role) {
-    const int choose = ChooseButton(G::device.load(std::memory_order_relaxed));
+    const u32 dev = G::device.load(std::memory_order_relaxed);
     switch (role) {
-    case G::PadChoose: return Label(choose);
-    case G::PadCancel: return Label(choose == SDL_CONTROLLER_BUTTON_A ? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A);
+    case G::PadChoose: return Label(ChooseButton(dev));
+    case G::PadCancel: return Label(BackButton(dev));
     case G::PadSouth: return Label(SDL_CONTROLLER_BUTTON_A);
     case G::PadEast: return Label(SDL_CONTROLLER_BUTTON_B);
     case G::PadWest: return Label(SDL_CONTROLLER_BUTTON_X);
@@ -157,7 +180,7 @@ void Apply(u32 dev) {
             }
         };
         faces(MenuLayout(dev, true), shown, symbols);
-        faces(dev != G::Nintendo, dshown, dsymbols);
+        faces(MenusLayoutFor(dev), dshown, dsymbols);
     }
     if (dev == G::Keyboard) {
         for (u32 face = 0; face < G::FaceCount; ++face) {
@@ -220,8 +243,16 @@ extern "C" void msr_buttons_state(int input, int icons) {
 }
 // input.c: a pad's bottom face button is 3DS A and its right one 3DS B now (the menus' layout)
 extern "C" int msr_menu_buttons(void) { return MenuLayout(PadFamily()) ? 1 : 0; }
-// video.c, overlay_host.cpp: the pad button that chooses (SDL's, by position) in touch mode and the settings
+// video.c, overlay_host.cpp: the pad buttons that choose and go back (SDL's, by position) in touch mode and the settings
 extern "C" int msr_pad_choose(void) { return ChooseButton(PadFamily()); }
+extern "C" int msr_pad_back(void) { return BackButton(PadFamily()); }
+// overlay_host.cpp: the Controls tab's Nintendo menu layout; the icons follow
+extern "C" void msr_set_menu_confirm_right(int on) {
+    if (confirm_right.exchange(on != 0) == (on != 0)) return;
+    const u32 dev = G::device.load();
+    if (dev != G::Unknown) Apply(dev);
+}
+extern "C" int msr_menu_confirm_right(void) { return confirm_right.load() ? 1 : 0; }
 
 // pica_vk.c: whether a texture is one of the game's icon sheets (1-3), 0 if not; by its size, format and the
 // CityHash64 of its bytes (only computed for the sheets' sizes). PWR_MSR_TRACE lists the hashes of textures of a

@@ -11,7 +11,8 @@
  * in menus and the auto_gameplay layout (large, or top = bottom screen hidden) while flying:
  *     MENU -> GAMEPLAY   the circle pad has been held for 1.2 s (steering)
  *     GAMEPLAY -> MENU   Start or Select (pause menu), a click/touch on the bottom screen, or 8 s without steering
- * Aspect: keep (letterbox), integer (largest whole-number scale), stretch. Fullscreen: borderless (desktop) or
+ * Aspect: keep (letterbox), integer (largest whole-number scale), stretch. The single layout's window opens 16:9
+ * (window_aspect: another, e.g. 21:9 or 32:9; the view fills a wider window up to 32:9, compositor.cpp). Fullscreen: borderless (desktop) or
  * exclusive; F11 or Alt+Enter toggles. Mouse/touch input follows the bottom screen wherever the layout puts it.
  * Filters: nearest, linear, sharp bilinear, FXAA (present.frag), FSR 1 = AMD FidelityFX EASU upscale into a per-screen image
  * of the output size, then RCAS sharpening into the window (fsr_easu/fsr_rcas.frag, shaders/fsr/, MIT). F1 or Select opens
@@ -88,6 +89,7 @@ static int opt_select_layout = 2;   /* the gamepad's Back/Select button: 0 3DS S
 static int opt_free_look = 0;       /* right stick orbits the chase camera (freelook.c) */
 static int opt_drawdist = 1;        /* draw distance multiplier (drawdist.c), read when the game starts */
 static int fs_last = 1;   /* the fullscreen mode F11 toggles to */
+static float opt_window_aspect = 16.f / 9.f;   /* the single layout's window when it opens ("21:9", "2.37") */
 
 static int pick(const char *v, const char *const *names, int n) { for (int i = 0; i < n; i++) if (!strcmp(v, names[i])) return i; return -1; }
 int video_option(const char *name, const char *value) {
@@ -97,6 +99,10 @@ int video_option(const char *name, const char *value) {
     else if (!strcmp(name, "aspect") && (i = pick(value, aspect_names, 3)) >= 0) opt_aspect = i;
     else if (!strcmp(name, "fullscreen") && (i = pick(value, fs_names, 3)) >= 0) { opt_fs = i; if (i) fs_last = i; }
     else if (!strcmp(name, "auto_gameplay") && (i = pick(value, layout_names, L_AUTO)) >= 0) opt_auto_gameplay = i;
+    else if (!strcmp(name, "window_aspect")) {
+        float a = 0, b = 1; if ((sscanf(value, "%f:%f", &a, &b) < 1) || b <= 0 || a / b < 1.f || a / b > 4.f) return -1;
+        opt_window_aspect = a / b;
+    }
     else if (!strcmp(name, "fsr_sharpness")) { char *e; double v = strtod(value, &e); if (*e || v < 0 || v > 2) return -1; opt_sharp = (float)v; }
     else if (!strcmp(name, "resolution")) {   /* 0: match the window (video_init, then each resize) */
         char *e; long v = strtol(value, &e, 10); if (e == value || *e || v < 0 || v > 10) return -1;
@@ -460,7 +466,7 @@ int video_init(int scale) {
     SDL_SetHint(SDL_HINT_GAMECONTROLLER_USE_BUTTON_LABELS, "0");
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | (g_input_none ? 0 : SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK))) { fprintf(stderr, "video: SDL_Init: %s\n", SDL_GetError()); return -1; }
     static const int cw[L_COUNT] = { TOP_W, TOP_W + BOT_W, TOP_W + BOT_W / 2, TOP_W, BOT_W, 0, TOP_W }, chh[L_COUNT] = { 2 * SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, 2 * SCR_H };
-    int win_w = opt_layout == L_SINGLE ? SCR_H * scale * 16 / 9 : cw[opt_layout] * scale;   /* single: 16:9 (1280x720 at 3) */
+    int win_w = opt_layout == L_SINGLE ? (int)lroundf(SCR_H * scale * opt_window_aspect) : cw[opt_layout] * scale;   /* single: 16:9 (1280x720 at 3) */
     win = SDL_CreateWindow("Metroid: Samus Returns", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, chh[opt_layout] * scale, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
     if (!win) { fprintf(stderr, "video: SDL_CreateWindow: %s\n", SDL_GetError()); return -1; }
     SDL_SetWindowMinimumSize(win, BOT_W, SCR_H);
@@ -878,9 +884,9 @@ int video_frame(void) {
         case SDL_JOYDEVICEREMOVED: if (joy && e.jdevice.which == SDL_JoystickInstanceID(joy)) { SDL_JoystickClose(joy); joy = NULL; input_pad_stick(0, 0); input_pad_release(); } break;
         case SDL_CONTROLLERBUTTONDOWN: case SDL_CONTROLLERBUTTONUP: if (g_input_none) break;
             {   /* Samus Returns' touch navigation: L3 in menus; while on, the D-pad moves, the menus' choosing button is the
-                   finger and their back button leaves (msr_pad_choose: the bottom and right ones, a Nintendo pad's A and B) */
-                int c = e.cbutton.button, down = e.type == SDL_CONTROLLERBUTTONDOWN, choose = msr_pad_choose();
-                int back = choose == SDL_CONTROLLER_BUTTON_A ? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A;
+                   finger and their back button leaves (msr_pad_choose, msr_pad_back: the bottom and right ones, a Nintendo
+                   pad's A and B; with the Nintendo menu layout, those bound to the game's A and B) */
+                int c = e.cbutton.button, down = e.type == SDL_CONTROLLERBUTTONDOWN, choose = msr_pad_choose(), back = msr_pad_back();
                 if (c == SDL_CONTROLLER_BUTTON_LEFTSTICK) { if (down) msr_touch_l3(); break; }
                 if (msr_touch_active()) {
                     if (down && c == SDL_CONTROLLER_BUTTON_DPAD_UP) msr_touch_step(0, -1);

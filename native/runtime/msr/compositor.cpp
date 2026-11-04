@@ -69,6 +69,7 @@ struct State {
     s64 hud_seen_us = -1'000'000'000;   // the HUD last showed (the pad's menus' layout, glyphs.cpp): not yet
     bool menu_icons = true;   // the icons in the menus' layout: the game starts in its menus
     float zoom = 1.f;
+    float aspect = 0.f;   // the view's aspect, easing to the wanted one (ViewAspectWanted); 0: not yet
     Rect prompt_text, prompt_card, prompt_card_shown;
     s64 prompt_card_us = 0, prompt_tall_us = 0, prompt_foreign_us = 0;
     float prompt_fit = 0;
@@ -235,12 +236,23 @@ void Consume(const BC::Image& image, s64 now) {
     }
 }
 
-// emu_window.cpp MsrSingleScreenLayout: the view (16:9, or the top screen's 5:3) centred in the window, the panel
+// The view's aspect for a window: 16:9 with widescreen, else the top screen's 5:3. Ultrawide (2026-11-03): in play the
+// view takes a wider window's aspect, up to 32:9; the world's squeeze (msr_world_scale) and the camera's field of view
+// (camera_fov.cpp) follow it through P::view_aspect. The title menus, the gallery and the prologue stay 16:9: the game
+// draws their scenes for its own view only, and their art (the title's logo) flat, as camera-facing quads without depth
+// test, which the squeeze leaves as they are (they would stretch to the window's width).
+float ViewAspectWanted(float ww, float wh) {
+    if (!P::widescreen.load(std::memory_order_relaxed)) return P::NativeAspect;
+    if (!P::ultrawide.load(std::memory_order_relaxed) || !st.in_play || wh <= 0.f) return P::WideAspect;
+    return std::clamp(ww / wh, P::WideAspect, P::UltraAspect);
+}
+
+// emu_window.cpp MsrSingleScreenLayout: the view (its aspect in effect, P::view_aspect) centred in the window, the panel
 // (the bottom screen's 4:3) centred in it at panel_scale of its height.
 void SingleLayout(float ww, float wh, Rect& top, Rect& panel) {
-    const float aspect = P::widescreen.load() ? 9.f / 16.f : 240.f / 400.f;
-    float w = ww, h = std::floor(ww * aspect);
-    if (h > wh) { h = wh; w = std::floor(wh / aspect); }
+    const float aspect = P::view_aspect.load(std::memory_order_relaxed);   // width over height
+    float w = ww, h = std::floor(ww / aspect);
+    if (h > wh) { h = wh; w = std::floor(wh * aspect); }
     const float x = std::floor((ww - w) / 2), y = std::floor((wh - h) / 2);
     top = {x, y, x + w, y + h};
     const float ph = std::round(h * std::clamp(P::panel_scale.load(), .3f, 1.f));
@@ -274,7 +286,7 @@ extern "C" int msr_beams_held(void) { return st.beams_held ? 1 : 0; }
 extern "C" void msr_world_scale(float* sx, float* sy) {
     const float zoom = P::world_zoom.load(std::memory_order_relaxed);
     *sx = zoom;
-    *sy = (P::widescreen.load(std::memory_order_relaxed) ? P::WideScale : 1.f) * zoom;
+    *sy = P::ViewScale() * zoom;
 }
 
 extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned buttons, float ww, float wh,
@@ -345,6 +357,11 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
                 (page == P::Page::FileList || page == P::Page::FileOpen || page == P::Page::Gallery))) {
         st.in_play = false;
     }
+    // the view's aspect: eased between play's (ultrawide) and the menus' 16:9, applied from the next frame's layout
+    const float aspect_target = ViewAspectWanted(ww, wh);
+    if (st.aspect <= 0.f || std::abs(aspect_target - st.aspect) < .002f) st.aspect = aspect_target;
+    else st.aspect += (aspect_target - st.aspect) * (1.f - std::exp(-8.f * seconds));
+    P::view_aspect.store(st.aspect, std::memory_order_relaxed);
     const float zoom_target = st.in_play ? P::zoom.load(std::memory_order_relaxed) : 1.f;
     st.zoom += (zoom_target - st.zoom) * (1.f - std::exp(-8.f * seconds));
     if (std::abs(zoom_target - st.zoom) < .001f) st.zoom = zoom_target;
@@ -384,7 +401,14 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
         panel = mix(layout_panel, px, py, pw, ph);
     }
 
-    const float left = layout_top.l, top_y = layout_top.t, width = layout_top.W(), height = layout_top.H();
+    // the HUD at the view's corners; on a view wider than 16:9, within its middle 16:9 if the player asks
+    float left = layout_top.l, width = layout_top.W();
+    const float top_y = layout_top.t, height = layout_top.H();
+    if (P::hud_within_16_9.load(std::memory_order_relaxed) && width > std::ceil(height * P::WideAspect)) {
+        const float w = std::round(height * P::WideAspect);
+        left += std::floor((width - w) / 2);
+        width = w;
+    }
     const float unit = height / 240.f * std::clamp(P::hud_scale.load(), .5f, 2.f);
     const float margin = 6.f * unit;
 

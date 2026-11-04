@@ -1,11 +1,12 @@
 /* fs:USER: archives and files (from Woohoo! Flight School).
- *   0x3 SelfNCCH  -> the RomFS level-3 image read straight out of the dump (g_romfs_path at g_romfs_offset, main.c;
- *                   the SDK walks its tables itself)
+ *   0x3 SelfNCCH  -> the RomFS level-3 image read straight out of the dump (g_dump at g_romfs_offset, main.c; a
+ *                   compressed dump through its frames, dump.c; the SDK walks its tables itself)
  *   0x4 SaveData, 0x6/0x7 ExtSaveData, 0x9 SDMC -> host folders under $PWR_SAVE_DIR (default ./save)
  * File and directory handles are sessions answering the File/Directory command sets. */
 #define _GNU_SOURCE
 #include "kernel.h"
 #include "runtime.h"
+#include "dump.h"
 #include "msr/msr.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,7 +33,8 @@ typedef struct { uint32_t id; char root[1024]; } Archive;   /* root empty = Self
 #define MAX_ARCH 32
 static Archive archives[MAX_ARCH];
 
-typedef struct { FILE *f; int romfs, write; char path[1600]; } FsFile;   /* path, write: to open it again (save states) */
+typedef struct { FILE *f; int romfs, write; char path[1600]; int ropen; } FsFile;   /* path, write: to open it again
+    (save states); the RomFS has no FILE: it reads through the game file's handle (g_dump, dump.c), ropen while open */
 typedef struct { DIR *d; char path[1200]; } FsDir;
 
 static const char *save_root(void) { const char *s = getenv("PWR_SAVE_DIR"); return s ? s : "save"; }
@@ -88,8 +90,8 @@ static uint32_t open_file(Archive *a, uint32_t ptype, uint32_t psize, uint32_t p
     FsFile *ff = calloc(1, sizeof *ff);
     if (a->id == 3) {
         /* SelfNCCH: the binary file path selects RomFS (type 0); other NCCH parts are not needed by the game */
-        ff->f = g_romfs_path ? fopen(g_romfs_path, "rb") : NULL; ff->romfs = 1;
-        if (!ff->f) { free(ff); fprintf(stderr, "svc: fs: cannot open the RomFS in %s\n", g_romfs_path ? g_romfs_path : "(no dump)"); return RES_NOT_FOUND; }
+        ff->romfs = 1; ff->ropen = 1;
+        if (!g_dump) { free(ff); fprintf(stderr, "svc: fs: cannot open the RomFS in %s\n", g_romfs_path ? g_romfs_path : "(no dump)"); return RES_NOT_FOUND; }
     } else {
         char rel[512], p[1600]; fs_path(ptype, psize, pptr, rel, sizeof rel);
         snprintf(p, sizeof p, "%s%s", a->root, rel);
@@ -186,14 +188,17 @@ static void file_handle(KThread *t, uint32_t *cmd, KObject *s) {
             size_t n = msr_romfs_read(off, size, g_mem + buf);
             cmd[0] = HDR(0x802, 2, 2); cmd[1] = RES_OK; cmd[2] = (uint32_t)n; cmd[3] = (size << 4) | 0xC; cmd[4] = buf; return;
         }
-        if (ff->romfs) {   /* the image inside the dump: no reads past its end */
+        size_t n;
+        if (ff->romfs) {   /* the image inside the game file (a compressed one too: dump.c): no reads past its end */
             if (off > g_romfs_size) off = g_romfs_size;
             if (size > g_romfs_size - off) size = (uint32_t)(g_romfs_size - off);
-            off += g_romfs_offset;
+            rt_mem_commit(buf, size);
+            n = dump_read(g_dump, g_romfs_offset + off, g_mem + buf, size) ? 0 : size;
+        } else {
+            fseeko(ff->f, (off_t)off, SEEK_SET);
+            rt_mem_commit(buf, size);
+            n = fread(g_mem + buf, 1, size, ff->f);
         }
-        fseeko(ff->f, (off_t)off, SEEK_SET);
-        rt_mem_commit(buf, size);
-        size_t n = fread(g_mem + buf, 1, size, ff->f);
         cmd[0] = HDR(0x802, 2, 2); cmd[1] = RES_OK; cmd[2] = (uint32_t)n; cmd[3] = (size << 4) | 0xC; cmd[4] = buf; return;
     }
     case 0x803: {   /* Write(offset u64, size, flush, buffer) -> bytes written */
@@ -212,7 +217,7 @@ static void file_handle(KThread *t, uint32_t *cmd, KObject *s) {
         if (!ff->romfs) { fflush(ff->f); if (ftruncate(fileno(ff->f), (off_t)sz)) {} }
         cmd[0] = HDR(0x805, 1, 0); cmd[1] = RES_OK; return;
     }
-    case 0x808: if (ff->f) fclose(ff->f); ff->f = NULL; cmd[0] = HDR(0x808, 1, 0); cmd[1] = RES_OK; return;   /* Close */
+    case 0x808: if (ff->f) fclose(ff->f); ff->f = NULL; ff->ropen = 0; cmd[0] = HDR(0x808, 1, 0); cmd[1] = RES_OK; return;   /* Close */
     case 0x809: if (ff->f) fflush(ff->f); cmd[0] = HDR(0x809, 1, 0); cmd[1] = RES_OK; return;                  /* Flush */
     default:
         fprintf(stderr, "svc: unhandled fs file command %08x (replying success)\n", cmd[0]);
@@ -248,7 +253,7 @@ void fs_state_save(SBuf *b) { sb_put(b, archives, sizeof archives); }
 void fs_state_load(SRd *r) { sr_get(r, archives, sizeof archives); }
 int fs_session_save(KObject *o, SBuf *b) {
     if (o->svc == &file_service) {
-        FsFile *ff = o->svc_state; uint32_t kind = 1, open = ff->f != NULL;
+        FsFile *ff = o->svc_state; uint32_t kind = 1, open = ff->romfs ? ff->ropen != 0 : ff->f != NULL;
         sb_u32(b, kind); sb_u32(b, (uint32_t)ff->romfs); sb_u32(b, (uint32_t)ff->write); sb_u32(b, open); sb_put(b, ff->path, sizeof ff->path);
         return 1;
     }
@@ -265,8 +270,9 @@ void fs_session_load(KObject *o, const char *name, SRd *r) {
     if (kind == 1) {
         FsFile *ff = calloc(1, sizeof *ff); sr_get(r, ff->path, sizeof ff->path); ff->path[sizeof ff->path - 1] = 0;
         ff->romfs = (int)romfs; ff->write = (int)write;
-        if (open) ff->f = romfs ? (g_romfs_path ? fopen(g_romfs_path, "rb") : NULL) : fopen(ff->path, write ? "r+b" : "rb");
-        if (open && !ff->f) fprintf(stderr, "state: %s could not be opened again\n", romfs ? "the RomFS" : ff->path);
+        if (romfs) ff->ropen = (int)open;   /* it reads through g_dump */
+        else if (open) ff->f = fopen(ff->path, write ? "r+b" : "rb");
+        if (open && (romfs ? !g_dump : !ff->f)) fprintf(stderr, "state: %s could not be opened again\n", romfs ? "the RomFS" : ff->path);
         o->svc = &file_service; o->svc_state = ff;
     } else if (kind == 2) {
         FsDir *fd = calloc(1, sizeof *fd); sr_get(r, fd->path, sizeof fd->path); fd->path[sizeof fd->path - 1] = 0;

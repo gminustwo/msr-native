@@ -40,6 +40,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
+#include "dump.h"
 #include "ini.h"
 #include "mods.h"
 #include "msr.h"
@@ -500,7 +501,36 @@ std::string CheckGame(const std::string& path) {
     const fs::path p = FromUtf8(path);
     if (!fs::is_regular_file(p, e)) return "There is no file there.";
     if (fs::file_size(p, e) < (16u << 20)) return "This file is too small to be the game.";
+    DumpFile* d = dump_open(path.c_str());   // a compressed one (.zcci) must be whole: its frames' table is at the end
+    if (!d) return "This file cannot be read (a compressed game file that is damaged or incomplete?).";
+    dump_close(d);
     return {};
+}
+
+// A compressed game file (.zcci, .zcxi: Azahar's Z3DS) for the recompiler, which reads the image itself and has no
+// zstd: the start of the image, decompressed, up to the end of its ExeFS (the headers, the exheader and the game's
+// code: a few MB), written to `out`. "" when done.
+std::string WriteImageStart(DumpFile* d, const fs::path& out) {
+    constexpr std::uint64_t Media = 0x200;
+    unsigned char h[0x200];
+    std::uint64_t ncch = 0;
+    const auto le32 = [](const unsigned char* p) { return std::uint32_t{p[0]} | std::uint32_t{p[1]} << 8 | std::uint32_t{p[2]} << 16 | std::uint32_t{p[3]} << 24; };
+    if (dump_read(d, 0, h, sizeof h)) return "The compressed game file cannot be read.";
+    if (!std::memcmp(h + 0x100, "NCSD", 4)) {
+        ncch = le32(h + 0x120) * Media;
+        if (dump_read(d, ncch, h, sizeof h)) return "The compressed game file cannot be read.";
+    }
+    if (std::memcmp(h + 0x100, "NCCH", 4)) return "The compressed file is not a 3DS game.";
+    const std::uint64_t end = ncch + std::max<std::uint64_t>(0x200 + 0x800, std::uint64_t{le32(h + 0x1A0)} * Media + std::uint64_t{le32(h + 0x1A4)} * Media);
+    if (end > dump_size(d) || end > (256u << 20)) return "The compressed game file is damaged.";
+    std::ofstream f(out, std::ios::binary | std::ios::trunc);
+    std::vector<char> buf(1 << 20);
+    for (std::uint64_t at = 0; at < end && f; at += buf.size()) {
+        const std::size_t n = static_cast<std::size_t>(std::min<std::uint64_t>(buf.size(), end - at));
+        if (dump_read(d, at, buf.data(), n)) return "The compressed game file cannot be read.";
+        f.write(buf.data(), static_cast<std::streamsize>(n));
+    }
+    return f ? std::string{} : "Could not write " + Utf8(out) + ".";
 }
 
 // The native code's state, from module.json beside it
@@ -675,9 +705,26 @@ std::string Build(const std::string& game) {
     }
     if (Cancelled()) return "Cancelled.";
     Status("Starting the recompiler");
+    std::string dump = game;   // a compressed game file: the start of its image, decompressed (WriteImageStart)
+    const fs::path image_start = S.user / "msr" / "recomp-image-start.cci";
+    fs::remove(image_start, e);
+    if (DumpFile* d = dump_open(game.c_str())) {
+        std::string error;
+        if (dump_compressed(d)) {
+            Status("Reading the compressed game file");
+            error = WriteImageStart(d, image_start);
+            dump = Utf8(image_start);
+        }
+        dump_close(d);
+        if (!error.empty()) return Fail(error);
+    }
+    struct Remove {
+        fs::path p;
+        ~Remove() { std::error_code ignored; fs::remove(p, ignored); }
+    } remove_after{image_start};
     unsigned jobs = std::max(1u, std::thread::hardware_concurrency());
     if (const char* j = std::getenv("MSR_BUILD_JOBS"); j && std::atoi(j) > 0) jobs = static_cast<unsigned>(std::atoi(j));
-    std::vector<std::string> args{python, "-I", "-B", Utf8(scripts), "--dump", game, "--user", Utf8(S.user), "--kit",
+    std::vector<std::string> args{python, "-I", "-B", Utf8(scripts), "--dump", dump, "--user", Utf8(S.user), "--kit",
                                   Utf8(KitFolder()), "--jobs", std::to_string(jobs), "--port-version", MSR_NATIVE_VERSION};
     for (const auto& entry : fs::directory_iterator(S.user / "msr", e)) {   // code an earlier run had to interpret
         const std::string name = Utf8(entry.path().filename());
@@ -761,7 +808,7 @@ std::string Browse(const std::string& current) {
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
     if (video_window() && SDL_GetWindowWMInfo(video_window(), &info)) of.hwndOwner = info.info.win.window;
-    of.lpstrFilter = L"3DS game dumps (*.3ds, *.cci, *.cxi)\0*.3ds;*.cci;*.cxi\0All files\0*.*\0";
+    of.lpstrFilter = L"3DS game dumps (*.3ds, *.cci, *.cxi, *.zcci, *.zcxi)\0*.3ds;*.cci;*.cxi;*.zcci;*.zcxi\0All files\0*.*\0";
     of.lpstrFile = file;
     of.nMaxFile = 4096;
     of.lpstrTitle = L"Metroid: Samus Returns (USA), decrypted";
@@ -771,8 +818,8 @@ std::string Browse(const std::string& current) {
     (void)current;
     const char* cmd = std::system("command -v zenity >/dev/null 2>&1") == 0
         ? "env -u LD_LIBRARY_PATH zenity --file-selection --title='Metroid: Samus Returns (USA), decrypted' "
-          "--file-filter='3DS game dumps | *.3ds *.cci *.cxi' --file-filter='All files | *' 2>/dev/null"
-        : "env -u LD_LIBRARY_PATH kdialog --getopenfilename . '*.3ds *.cci *.cxi' 2>/dev/null";
+          "--file-filter='3DS game dumps | *.3ds *.cci *.cxi *.zcci *.zcxi' --file-filter='All files | *' 2>/dev/null"
+        : "env -u LD_LIBRARY_PATH kdialog --getopenfilename . '*.3ds *.cci *.cxi *.zcci *.zcxi' 2>/dev/null";
     FILE* p = popen(cmd, "r");
     if (!p) return {};
     char buf[4096];

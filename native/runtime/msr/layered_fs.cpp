@@ -14,6 +14,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "dump.h"
 #include "msr.h"
 #include "mods.h"
 #include "patch.h"
@@ -154,7 +155,7 @@ private:
     void BuildFiles();
     void RebuildMetadata();
 
-    std::FILE* base = nullptr;
+    DumpFile* base = nullptr;   // the game file, plain or compressed (dump.c)
     u64 base_offset = 0, base_size = 0;
     RomFSHeader header{};
     Directory root;
@@ -181,7 +182,7 @@ private:
 
 bool LayeredFS::ReadBase(u64 offset, std::size_t length, u8* out) {
     if (offset > base_size || length > base_size - offset) return false;
-    return fseeko(base, static_cast<off_t>(base_offset + offset), SEEK_SET) == 0 && std::fread(out, 1, length, base) == length;
+    return dump_read(base, base_offset + offset, out, length) == 0;
 }
 
 std::string LayeredFS::ReadName(u64 offset, u32 length) {
@@ -465,7 +466,7 @@ void LayeredFS::RebuildMetadata() {
 }
 
 bool LayeredFS::Build(const std::string& dump, u64 offset, u64 size, const std::vector<std::string>& mods) {
-    base = OpenRead(dump);
+    base = dump_open(dump.c_str());
     base_offset = offset;
     base_size = size;
     if (!base || !ReadBase(0, sizeof header, reinterpret_cast<u8*>(&header)) || header.header_length != sizeof header) {

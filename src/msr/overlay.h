@@ -27,6 +27,7 @@ namespace MSR {
 /// Options of the single-screen presentation, saved in user/msr/settings.ini.
 struct PlayerSettings {
     bool widescreen = true;
+    bool ultrawide = true;   ///< With widescreen: the view fills a window wider than 16:9, up to 32:9
     float camera_zoom = 1.f; ///< The view in play: below 1 wider, above 1 closer
     float hud_scale = .6f;
     float hud_opacity = 1.f;
@@ -35,6 +36,7 @@ struct PlayerSettings {
     float minimap_opacity = .85f;
     bool show_counters = true;
     bool show_abilities = true;
+    bool hud_within_16_9 = false; ///< Ultrawide: the HUD at the corners of the view's middle 16:9
     float panel_scale = 1.f;
     float menu_backdrop = .75f; ///< Opacity of the card behind the title menus
     bool control_hints = true;  ///< Help text beside the pause menu, file select and touch mode
@@ -49,6 +51,7 @@ struct PlayerSettings {
     // Extras otherwise given by amiibo (msr/cheats.h)
     bool unlock_galleries = true;
     bool unlock_fusion_mode = true;
+    bool unlock_hard_mode = true;  ///< Hard Mode from the start: a new file and every New Game offer it
     bool fusion_suit = false;
     // Cheats: inventory items kept at their maximum (msr/cheats.h Refills)
     bool infinite_energy = false;
@@ -89,6 +92,7 @@ struct EmulatorSettings {
     int max_resolution = 10; ///< The largest factor offered
     bool quick_saves = true; ///< Quick save and load
     bool bloom_option = false; ///< The Bloom slider (msr-native)
+    bool ultrawide_option = false; ///< The Ultrawide and HUD within 16:9 rows (msr-native)
     bool deck_preset = false;  ///< The Steam Deck preset button (msr-native on a Steam Deck)
     int hdr_option = 0;        ///< The HDR rows: 0 none (the emulator build), 1 the display is not in HDR mode, 2 HDR possible
     float display_peak = 1000.f, display_paper = 200.f; ///< The display's peak brightness, Windows' SDR white (nits)
@@ -107,6 +111,8 @@ struct ControlsSnapshot {
     bool controller_connected = false;
     bool right_stick_option = false; ///< msr-native: the Aeion abilities can be put on the right stick
     bool right_stick_dpad = false;   ///< The right stick is the D-pad, the pad's D-pad the Circle Pad
+    bool menu_layout_option = false; ///< msr-native: menus can confirm as the game does (Nintendo menu layout)
+    bool menu_confirm_right = false; ///< Menus choose with the game's A as bound (else A / Cross, the bottom button)
 };
 
 /// The Mods and Textures tabs: game mods and texture packs (msr/mods.h). Built and applied on
@@ -165,6 +171,7 @@ struct OverlayAction {
         GamepadLayout,    ///< Map every control to the connected gamepad, by position
         KeyboardLayout,   ///< Restore the default keyboard bindings
         RightStickDpad,   ///< msr-native: the Aeion abilities on the right stick (`value` 0 or 1)
+        MenuConfirmRight, ///< msr-native: the Nintendo menu layout (`value` 0 or 1)
         FrameRate,        ///< The frame rate changed: apply the CPU clock and presentation
         GameMod,          ///< Enable or disable game mod `value` (an index in ModsSnapshot)
         GameModUp,        ///< Raise game mod `value`'s priority

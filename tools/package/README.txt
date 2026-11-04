@@ -7,7 +7,8 @@ Nothing of the game comes with this program.
 
 You need
 --------
-- A decrypted dump of Metroid: Samus Returns (USA): a .3ds, .cci or .cxi file.
+- A decrypted dump of Metroid: Samus Returns (USA): a .3ds, .cci or .cxi file, or one
+  compressed by Azahar (.zcci, .zcxi), which is read as it is.
 - A graphics card with Vulkan 1.3.
 - About 1 GB of free space and an internet connection for the first build (it downloads
   the build tools: Zig, capstone and, on Windows, Python; about 105 MB).
@@ -50,12 +51,14 @@ Keyboard and mouse (change them in the menu's Controls tab):
   Aeion abilities 1 2 3 4                      Pause menu Tab
   Touch navigation T    Settings F1            Quick save F5, quick load F8
   Fullscreen F11
-Controllers are read by button position. The button icons in the game follow the device you
+The picture fills ultrawide screens (up to 32:9) in play; the menu's Display tab has the
+option. Controllers are read by button position. The button icons in the game follow the device you
 used last (Xbox, PlayStation, Nintendo or the keyboard's keys).
 
 Licences
 --------
 msr-native is free software under the GNU GPL version 3 or later (LICENSE-GPL-3.0.txt). The
 parts from the emulator-based Samus Returns port are GPL 2.0 or later (LICENSE-GPL-2.0.txt).
+zstd, which reads compressed game files, is BSD (LICENSE-zstd.txt).
 Dear ImGui and AMD FidelityFX FSR 1 are MIT. Metroid: Samus Returns belongs to Nintendo; this
 program contains none of it.

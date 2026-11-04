@@ -79,6 +79,8 @@ void RefreshControls() {
     s.controller_connected = video_pad_connected() != 0;
     s.right_stick_option = true;
     s.right_stick_dpad = input_right_stick_dpad() != 0;
+    s.menu_layout_option = true;
+    s.menu_confirm_right = msr_menu_confirm_right() != 0;
     O().SetControls(s);
 }
 
@@ -90,12 +92,14 @@ void SaveControls() {
         file.SetNumber("native_controls", key + "_pad", input_pad_binds()[c]);
     }
     file.SetBool("native_controls", "right_stick_dpad", input_right_stick_dpad() != 0);
+    file.SetBool("native_controls", "menu_confirm_right", msr_menu_confirm_right() != 0);
     if (!file.Save()) std::fprintf(stderr, "msr: could not save the controls\n");
 }
 
 void LoadControls() {
     const MsrIni::File file(msr_settings_file());
     input_set_right_stick_dpad(file.Bool("native_controls", "right_stick_dpad", input_right_stick_dpad() != 0));
+    msr_set_menu_confirm_right(file.Bool("native_controls", "menu_confirm_right", msr_menu_confirm_right() != 0));
     for (int c = 0; c < Controls; ++c) {
         const std::string key = input_control_key(c);
         if (file.Raw("native_controls", key + "_key")) {
@@ -181,12 +185,14 @@ ImGuiKey PadKeyOf(int button) {
     // SDL names the face buttons by position (A = bottom; video.c asks it to for Nintendo pads too), as ImGui does.
     // overlay.cpp has ImGui choose with the right face button (ConfigNavSwapGamepadButtons, the game's layout): the
     // pad's choosing button (glyphs.cpp msr_pad_choose: the bottom one, the right one on a Nintendo pad) is given as it.
-    const int choose = msr_pad_choose();
+    // Its back button (msr_pad_back) is given as the bottom one, ImGui's back; the other face buttons choose and go
+    // back nowhere (the Nintendo menu layout can put the game's A and B on any two).
+    const int choose = msr_pad_choose(), back = msr_pad_back();
     if (button == choose) return ImGuiKey_GamepadFaceRight;
-    if (button == (choose == SDL_CONTROLLER_BUTTON_A ? SDL_CONTROLLER_BUTTON_B : SDL_CONTROLLER_BUTTON_A)) return ImGuiKey_GamepadFaceDown;
+    if (button == back) return ImGuiKey_GamepadFaceDown;
     switch (button) {
-    case SDL_CONTROLLER_BUTTON_A: return ImGuiKey_GamepadFaceDown;
-    case SDL_CONTROLLER_BUTTON_B: return ImGuiKey_GamepadFaceRight;
+    case SDL_CONTROLLER_BUTTON_A:
+    case SDL_CONTROLLER_BUTTON_B: return ImGuiKey_None;
     case SDL_CONTROLLER_BUTTON_X: return ImGuiKey_GamepadFaceLeft;
     case SDL_CONTROLLER_BUTTON_Y: return ImGuiKey_GamepadFaceUp;
     case SDL_CONTROLLER_BUTTON_START: return ImGuiKey_GamepadStart;
@@ -258,6 +264,7 @@ extern "C" void msr_overlay_start(int fullscreen, int resolution, int vsync, int
     launched.max_resolution = 10;
     launched.quick_saves = true;
     launched.bloom_option = true;
+    launched.ultrawide_option = true;
     launched.deck_preset = SteamDeck();
     emulator = launched;
     O().SetEmulatorSettings(emulator);
@@ -497,6 +504,11 @@ extern "C" void msr_overlay_frame(void) {
             break;
         case Kind::RightStickDpad:
             input_set_right_stick_dpad(action.value);
+            SaveControls();
+            RefreshControls();
+            break;
+        case Kind::MenuConfirmRight:
+            msr_set_menu_confirm_right(action.value);
             SaveControls();
             RefreshControls();
             break;

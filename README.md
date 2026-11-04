@@ -4,8 +4,9 @@ Metroid: Samus Returns on PC without an emulator, for private testing. The game'
 own dump into a library (`msr_aot.dll`), and a small runtime stands in for the 3DS: kernel, system services, the
 PICA200 GPU (Vulkan), the DSP, input and the window. The runtime comes from
 [Woohoo! Flight School](https://github.com/thefixinhixon/woohoo-flight-school). Samus Returns' own features are on
-top: the 16:9 single screen with the HUD, 30-144 FPS, up to 10x internal resolution, HDR, texture packs, game mods,
-the randomizer, save states, cheats, mouse aiming and per-device button icons. `native/README.md` has the details.
+top: the 16:9 or ultrawide (to 32:9) single screen with the HUD, 30-144 FPS, up to 10x internal resolution, HDR,
+texture packs, game mods, the randomizer, save states, cheats, mouse aiming and per-device button icons.
+`native/README.md` has the details.
 
 **No game code or data is in this repository.** The dump, the library made from it, saves and texture packs live in
 `run/` and `test/`, which git ignores.
@@ -42,7 +43,7 @@ The user folder is `user/` beside the program (Windows; Linux when one is there,
 
 ## Build (Windows)
 
-You need MSYS2 UCRT64 with these packages: `mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,SDL2,libpng,zlib,shaderc,vulkan-headers,vulkan-loader}`.
+You need MSYS2 UCRT64 with these packages: `mingw-w64-ucrt-x86_64-{gcc,cmake,ninja,SDL2,libpng,zlib,zstd,shaderc,vulkan-headers,vulkan-loader}`.
 The Vulkan SDK also works for the Vulkan headers and glslc.
 
 ```sh
@@ -57,9 +58,10 @@ Keep builds at `-j 8` or less on this PC: the i9-14900K resets under all-core lo
 
 ```sh
 python tools/package/windows.py                  # dist/msr-native-<version>-windows-x64.zip
-# Linux, from PowerShell (WSL Ubuntu; SDL2 built from the emulator tree's source, as the system has no SDL2 headers):
-wsl -d Ubuntu --cd /mnt/d/Games/pcports/3ds_ports/msr-native -- env MSR_JOBS=8 bash tools/package/appimage.sh \
-    /home/lou/msr-native-build /home/lou/samus-build/src/externals/sdl2/SDL
+# Linux, from PowerShell (WSL Ubuntu; SDL2 and zstd built from the emulator tree's source, as the system has neither's
+# headers):
+wsl -d Ubuntu --cd /mnt/d/Games/pcports/msr-native -- env MSR_JOBS=8 bash tools/package/appimage.sh \
+    /home/lou/msr-native-build /home/lou/samus-build/src/externals/sdl2/SDL /home/lou/samus-build/src/externals/zstd
 ```
 
 The version is `MSR_NATIVE_VERSION` in `native/CMakeLists.txt`. Each package holds the program, the recompiler

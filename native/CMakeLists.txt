@@ -69,7 +69,7 @@ endforeach()
 msr_shader(pica_nd.frag.inc pica.frag -DNO_FRAG_DEPTH)
 
 add_executable(msr-native
-  runtime/main.c runtime/kernel.c runtime/services.c runtime/fs.c runtime/gsp.c runtime/pica.c runtime/video.c
+  runtime/main.c runtime/kernel.c runtime/services.c runtime/fs.c runtime/dump.c runtime/gsp.c runtime/pica.c runtime/video.c
   runtime/dsp.c runtime/pica_sw.c runtime/input.c runtime/pica_vk.c runtime/pica_vsgen.c runtime/runtime.c
   runtime/stubs.c runtime/interp.c runtime/interp_full.c runtime/dispatch.cpp runtime/state.c
   runtime/msr/settings.cpp runtime/msr/patches.cpp runtime/msr/compositor.cpp runtime/msr/cheats.cpp runtime/msr/camera_fov.cpp runtime/msr/glyphs.cpp
@@ -104,6 +104,26 @@ target_link_libraries(msr_native_imgui PUBLIC Vulkan::Vulkan)
 target_link_libraries(msr-native PRIVATE msr_native_imgui)
 target_compile_options(msr-native PRIVATE $<$<COMPILE_LANGUAGE:C>:-Wno-unused-result>)
 target_link_libraries(msr-native PRIVATE Threads::Threads Vulkan::Vulkan SDL2::SDL2 m ${CMAKE_DL_LIBS})
+# zstd's decoder, for compressed game files (.zcci, .zcxi: runtime/dump.c): built statically from a zstd source folder
+# (MSR_ZSTD_SOURCE: the emulator-based build's externals/zstd; the Linux release, whose build system has no zstd
+# headers), else the system's libzstd (MSYS2: mingw-w64-ucrt-x86_64-zstd; Linux: libzstd-dev)
+set(MSR_ZSTD_SOURCE "" CACHE PATH "Build zstd's decoder statically from this source folder instead of using the system's")
+if (MSR_ZSTD_SOURCE)
+    file(GLOB MSR_ZSTD_FILES ${MSR_ZSTD_SOURCE}/lib/common/*.c ${MSR_ZSTD_SOURCE}/lib/decompress/*.c)
+    add_library(msr_zstd STATIC ${MSR_ZSTD_FILES})
+    target_include_directories(msr_zstd SYSTEM PUBLIC ${MSR_ZSTD_SOURCE}/lib)
+    target_compile_definitions(msr_zstd PRIVATE ZSTD_DISABLE_ASM ZSTD_LEGACY_SUPPORT=0 XXH_NAMESPACE=ZSTD_)
+    set_target_properties(msr_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_link_libraries(msr-native PRIVATE msr_zstd)
+else()
+    find_path(MSR_ZSTD_INCLUDE zstd.h)
+    find_library(MSR_ZSTD_LIBRARY NAMES zstd)
+    if (NOT MSR_ZSTD_INCLUDE OR NOT MSR_ZSTD_LIBRARY)
+        message(FATAL_ERROR "msr-native: zstd is needed (libzstd, or MSR_ZSTD_SOURCE=<a zstd source folder>)")
+    endif()
+    target_include_directories(msr-native SYSTEM PRIVATE ${MSR_ZSTD_INCLUDE})
+    target_link_libraries(msr-native PRIVATE ${MSR_ZSTD_LIBRARY})
+endif()
 # Save states are compressed with zlib when it is there (it comes with libpng)
 find_package(ZLIB)
 if (ZLIB_FOUND)

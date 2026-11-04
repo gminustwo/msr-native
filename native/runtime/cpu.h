@@ -72,6 +72,8 @@ int rt_has_code(uint32_t pc);                  /* an entry point for pc (bit 0: 
 /* a game mod changed the code at base (as the dump had it, as the mod left it): the recompiled functions covering the
    changed words are turned off, so the fallback interpreter runs them */
 void rt_code_changed(uint32_t base, const uint8_t *original, uint32_t original_size, const uint8_t *modded, uint32_t modded_size);
+/* instructions rewritten while the game runs that the module does not check: their functions run on the interpreter */
+void rt_code_patchable(const uint32_t *words, uint32_t count);
 void rt_cpu_init(CPU *c, uint32_t entry);      /* user mode, RunFast FPSCR, memory, pc (bit 0: Thumb) */
 void rt_run(CPU *c);                           /* runs until the guest thread returns to EXIT_MAGIC */
 void rt_svc(CPU *c, uint32_t num, uint32_t pc);   /* kernel.c */

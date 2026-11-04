@@ -8,7 +8,7 @@ services, the PICA200 GPU, the DSP) is a small hand-written runtime instead of a
 ```
 your dump ──> tools/msr/recomp/build_module.py ──> user/msr/recomp/msr_aot.dll   (the same library the launcher's
                                                                                   "Native code" Build makes)
-msr-native.exe ── loads the dump's .code, ExHeader and RomFS straight from the dump file
+msr-native.exe ── loads the dump's .code, ExHeader and RomFS straight from the dump file (a compressed .zcci too)
                ── loads msr_aot.dll and checks it (module version, sizeof(Ctx), SHA-256 of aot_runtime.h)
                ── runtime/dispatch.cpp: one host thread per guest thread, function to function through the module
                ── runtime/kernel.c, services.c, fs.c, gsp.c, dsp.c, pica*.c, video.c, input.c (from Woohoo! Flight School)
@@ -40,6 +40,17 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   RT tapped the same slot again). A picture on the bottom screen with a cyan edge, such as the ship's cockpit after a
   file's Continue, is not taken for a menu (it had shown as the panel, its outline over the view for about a second):
   the pause menu's pages stand over its bottom bar, a rule in the last rows, which the picture lacks.
+- Ultrawide (2026-11-03; the Display tab's Ultrawide, on by default, `settings.ini` `ultrawide`): in play the view
+  takes the window's aspect when it is wider than 16:9, up to 32:9, everything still on the one screen
+  (`compositor.cpp` ViewAspectWanted; wider still, bars at the sides). The world's squeeze becomes 5:3 over the view's
+  aspect (`P::view_aspect`, `presentation.h` ViewScale: 15/16 at 16:9, 15/32 at 32:9), and the camera's field of view
+  widens to match (`camera_fov.cpp`: a gain of about 2.1 at 32:9, 3.05 with the smallest zoom), so the game shows and
+  culls for the whole width. The HUD keeps to the view's corners, or to its middle 16:9's (the HUD tab's "HUD within
+  16:9", `hud_within_16_9`); menus stay centred. The title menus, the gallery and the prologue stay 16:9, as the game
+  draws their scenes for its own view and their art (the title's logo) as camera-facing quads without depth test,
+  which would stretch; the view eases between the two (~0.4 s). The picture is rendered 400 x 240 times the internal
+  resolution and stretched across, so a wide view is softer across than up: a higher internal resolution, or the FSR
+  filter, sharpens it. `--window_aspect=21:9` (or `32:9`, `2.37`) opens the single layout's window at that shape.
 - Input: RT taps the next beam slot, LT the minimap (Morph Ball), as injected touches while the HUD shows (C and
   Left Shift too, and the mouse wheel: down the next beam, up the one before); the pad's Back/Select opens the settings
   panel (`select_layout`: `settings`, or true for the next layout, false for 3DS Select). Every pad SDL can map is
@@ -65,7 +76,10 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   dialog over play keeps play's, as its text names play's buttons), the dialogs' "A check mark" and "B cross" always.
   A Nintendo pad keeps the game's layout, which its labels already match; SDL is asked for every pad's buttons by
   position (SDL 2 gave a Nintendo pad's by label, so its A came as the bottom button). `PWR_MSR_TRACE=1` logs the
-  layouts changing.
+  layouts changing. The Controls tab's "Nintendo menu layout" (off by default; `settings.ini` `[native_controls]`
+  `menu_confirm_right`; msr2ds issue 1) turns the menus' layout off for every pad: menus, dialogs, touch navigation and
+  the settings then choose with the button bound to the game's A and go back with the one bound to its B (by default
+  the right and bottom ones), and the icons and reminders name those (`glyphs.cpp` ChooseButton, BackButton).
 - The Aeion abilities on the right stick (2026-11-03; the Controls tab's checkbox, in the launcher and the game's menu,
   `settings.ini` `[native_controls]` `right_stick_dpad`): the right stick pushed past half way is the 3DS D-pad in the
   one direction it is pushed furthest (let go under a third), and the pad's D-pad moves the circle pad as the left
@@ -106,6 +120,18 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   (2026-11-03: behind the file select the title scene's highlights, expanded first, stayed brighter than the menu).
   Behind the title menus (the file select) the view darkens by 25-60% as the Title menu background setting says
   (20% before), the pause menu's by 45%.
+- Hard Mode from the start (2026-11-03, the Game tab, on by default): the game offers Hard only in a beaten save's New
+  Game. With it on, every New Game opens the difficulty list (Normal, Hard, Fusion) and so does a new file's Play
+  (`cheats.h`: its handler branches to the New Game's), which the game otherwise starts on Normal. The list was made
+  for a used slot, so `msr/patches.cpp` adapts it to an empty one with three call hooks on the file select (the
+  dispatcher's `rt_add_call_hook`): the change to the list leaves from the used slot's "Start a new game?" state (the
+  new-file panel's way out fades everything out for the game's start), the list's Back goes to the files rather than
+  a used slot's Continue / New Game / Options, the questions say "Start a new game?" rather than "Current data will be
+  erased", and Yes starts the game as a new file's Play does. The difficulty is the slot summary's +0x7C, as the
+  game's own Yes handlers write it. The patched word is newer than the players' native code, which does not check it:
+  `dispatch.cpp` `rt_code_patchable` turns off the two recompiled functions holding it, so the interpreter runs them
+  (quietly: not listed as code the native code lacks), and no rebuild is needed. `PWR_CALL_TRACE=<hex>[,<hex>...]`
+  logs each call of those ARM functions (r0-r3, lr), as used to follow the file select's states (0x4E40A0).
 - The amiibo extras (galleries, Fusion Mode, the Fusion suit) and the cheats (energy, missiles, Aeion kept full):
   `cheats.h`'s patches follow the settings each VBlank; `cheats.cpp` refills as the emulator build's
   ApplyMsrRefills, calling the components' setters on the game thread from a trap at the frame limiter.
@@ -235,7 +261,7 @@ game mods and texture packs it finds itself (`--texture-pack <folder>` instead, 
 
 ## Build and run
 
-Windows (MSYS2 UCRT64: gcc, cmake, ninja, SDL2, Vulkan headers and loader, shaderc):
+Windows (MSYS2 UCRT64: gcc, cmake, ninja, SDL2, zstd, Vulkan headers and loader, shaderc):
 
 ```sh
 cmake -S native -B build -G Ninja && cmake --build build -j 8
@@ -256,7 +282,8 @@ frame, counted from each top-screen swap: bisects an artifact to its draws; with
 state in that frame instead), `PWR_GX_COPYLOG=1` (each distinct TextureCopy once), `PWR_GXDUMP=<frame>` (VRAM after
 every GX command of that game frame, `gxdump_<n>_<cmd>.bin`: decode the tiled surfaces to see where an artifact appears), `PWR_TRACE=1` (kernel calls and IPC),
 `PWR_HANG_AT=<s>` (every thread and what it waits on), `PWR_RENDERER=sw` (the software rasterizer),
-`PWR_DRAWDBG=<target>,<shader>,<after s>,<count>` (draw state), `PWR_PEEK=<addr>,<words>` (guest memory).
+`PWR_DRAWDBG=<target>,<shader>,<after s>,<count>` (draw state), `PWR_PEEK=<addr>,<words>` (guest memory), `PWR_CALL_TRACE=<hex>[,<hex>...]` (each call of
+those ARM functions: r0-r3, lr).
 `MSR_NATIVE_ENTRIES_OUT=<file>` collects code the module lacks, for `build_module.py --extra`. `PWR_TEX_TRACE=1` lists
 each texture sampled into each target once, with the targets it lies in (how render-to-texture flows);
 `PWR_TEXPACK_TRACE=1` lists each texture a pack replaces. `PWR_SEQ=<presented frame>,<count>[,<every>]` writes both
@@ -276,6 +303,14 @@ flashes show up there.
   that base to VRAM and keeps its buffers in FCRAM, so the sum is converted to a virtual address, not the base
   (`pica_sw.c` `vtx_va`).
 - The RomFS is read in place from the dump (`fs.c`), not extracted.
+- Compressed dumps (2026-11-03, msr2ds issue 22): Azahar's Z3DS (`.zcci`, `.zcxi`: a 0x20-byte header, metadata, then
+  zstd's seekable format, 256 KiB frames each compressed on its own and their sizes in a seek table at the end) are read
+  in place too: `dump.c` serves the loader (`main.c`), the RomFS (`fs.c`, through the one handle `g_dump`) and the game
+  mods' rebuilt RomFS (`layered_fs.cpp`), decompressing the frames a read covers (whole ones straight into the game's
+  buffer, partial ones through an 8 MiB cache) with zstd's decoder: the system's libzstd, or built from
+  `MSR_ZSTD_SOURCE` (the emulator-based build's `externals/zstd`; the Linux release). The recompiler, which reads the
+  dump itself in Python, is given the image's start decompressed (`launcher.cpp` WriteImageStart: up to the ExeFS's
+  end, a few MB). A 1 GiB dump is 527 MB as a `.zcci`; reading it all takes about 0.8 s of CPU.
 - The TEV combiner buffer lags one stage, as the hardware (Citra's model): Samus Returns' post-processing composite
   adds the scene (stage 0) and the bloom (stage 1) through it.
 - DisplayTransfer bit 5 (no swizzle conversion, tiled to tiled) for the bloom and light-shaft downscales, and with

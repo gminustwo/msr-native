@@ -20,6 +20,7 @@ void PlayerSettings::Load(const std::string& path) {
         value = static_cast<float>(file.Number("General", key, value));
     };
     flag("widescreen", widescreen);
+    flag("ultrawide", ultrawide);
     number("camera_zoom", camera_zoom);
     camera_zoom = std::clamp(camera_zoom, CameraZoomMin, CameraZoomMax);
     number("hud_scale", hud_scale);
@@ -29,6 +30,7 @@ void PlayerSettings::Load(const std::string& path) {
     number("minimap_opacity", minimap_opacity);
     flag("show_counters", show_counters);
     flag("show_abilities", show_abilities);
+    flag("hud_within_16_9", hud_within_16_9);
     number("panel_scale", panel_scale);
     number("menu_backdrop", menu_backdrop);
     flag("control_hints", control_hints);
@@ -45,6 +47,7 @@ void PlayerSettings::Load(const std::string& path) {
     number("hdr_paper", hdr_paper);
     flag("unlock_galleries", unlock_galleries);
     flag("unlock_fusion_mode", unlock_fusion_mode);
+    flag("unlock_hard_mode", unlock_hard_mode);
     flag("fusion_suit", fusion_suit);
     flag("infinite_energy", infinite_energy);
     flag("infinite_missiles", infinite_missiles);
@@ -56,6 +59,7 @@ void PlayerSettings::Save(const std::string& path) const {
     const auto flag = [&](const char* key, bool value) { file.SetBool("General", key, value); };
     const auto number = [&](const char* key, double value) { file.SetNumber("General", key, value); };
     flag("widescreen", widescreen);
+    flag("ultrawide", ultrawide);
     number("camera_zoom", camera_zoom);
     number("hud_scale", hud_scale);
     number("hud_opacity", hud_opacity);
@@ -64,6 +68,7 @@ void PlayerSettings::Save(const std::string& path) const {
     number("minimap_opacity", minimap_opacity);
     flag("show_counters", show_counters);
     flag("show_abilities", show_abilities);
+    flag("hud_within_16_9", hud_within_16_9);
     number("panel_scale", panel_scale);
     number("menu_backdrop", menu_backdrop);
     flag("control_hints", control_hints);
@@ -76,6 +81,7 @@ void PlayerSettings::Save(const std::string& path) const {
     number("hdr_paper", hdr_paper);
     flag("unlock_galleries", unlock_galleries);
     flag("unlock_fusion_mode", unlock_fusion_mode);
+    flag("unlock_hard_mode", unlock_hard_mode);
     flag("fusion_suit", fusion_suit);
     flag("infinite_energy", infinite_energy);
     flag("infinite_missiles", infinite_missiles);

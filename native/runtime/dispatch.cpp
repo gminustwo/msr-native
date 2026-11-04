@@ -136,6 +136,7 @@ std::unordered_set<uint32_t> missing_seen;   // reported in this run
 std::unordered_set<uint32_t> listed;         // already in the entries file (from earlier runs too)
 std::string entries_file;
 uint32_t quiet_lo, quiet_hi;
+std::vector<std::pair<uint32_t, uint32_t>> quiet_spans;   // functions turned off on purpose (rt_code_patchable), at boot
 // A host function called on entry to one guest function (ARM), before its code runs (rt_set_call_hook): every call goes
 // through Lookup here, so this needs no change to the recompiled code.
 uint32_t hook_pc = 0xFFFFFFFFu;
@@ -151,6 +152,9 @@ void NoteMissing(const CPU* c) {
     const uint32_t at = c->r[15] | c->thumb;
     if (c->r[15] >= quiet_lo && c->r[15] < quiet_hi) {
         return;
+    }
+    for (const auto& [lo, hi] : quiet_spans) {
+        if (c->r[15] >= lo && c->r[15] < hi) return;
     }
     // With a game mod's code the interpreter runs the functions it changed and the code it added: neither belongs in
     // the list for the next build of the game's own code.
@@ -283,12 +287,74 @@ extern "C" int rt_module_load(const char* path) {
     }
     std::fprintf(stderr, "native: %zu entry points in %u shards from %s\n", entries,
                  module->shard_count, path);
+    if (const char* list = std::getenv("PWR_CALL_TRACE")) {   // <hex>[,<hex>...]: each call of those ARM functions
+        for (const char* p = list; *p;) {
+            char* end;
+            const unsigned long pc = std::strtoul(p, &end, 16);
+            if (end == p) break;
+            rt_add_call_hook(static_cast<uint32_t>(pc), [](CPU* c) {
+                std::fprintf(stderr, "call %08x r0=%08x r1=%08x r2=%08x r3=%08x lr=%08x\n", c->r[15], c->r[0], c->r[1],
+                             c->r[2], c->r[3], c->r[14]);
+            });
+            p = *end == ',' ? end + 1 : end;
+        }
+    }
     return 0;
 }
 
+// Turns off every recompiled function covering one of `words` (sorted), so the fallback interpreter runs that code as
+// memory has it; calls between the functions go through Lookup, so the others stay recompiled. `quiet`: their code is
+// not listed as code the module lacks. The functions' number and their entry points'.
+static std::pair<size_t, size_t> TurnOff(const std::vector<uint32_t>& words, bool quiet, const char* trace) {
+    std::unordered_set<MsrAot::Handler> off;
+    for (MsrAot::u32 i = 0; i < span_count; ++i) {
+        const auto& s = spans[i];
+        const auto it = std::lower_bound(words.begin(), words.end(), s.lo & ~3u);
+        if (it == words.end() || *it >= s.hi) continue;
+        if (trace && std::getenv(trace)) {
+            std::fprintf(stderr, "native: %08x in function %08x [%08x, %08x) runs on the interpreter\n", *it, s.entry, s.lo,
+                         s.hi);
+        }
+        if (quiet) quiet_spans.emplace_back(s.lo & ~3u, s.hi);
+        if (const MsrAot::Handler h = Lookup(s.entry, s.thumb)) off.insert(h);
+    }
+    size_t entries = 0;
+    for (auto& h : arm_handlers) {
+        if (h && off.count(h)) {
+            h = nullptr;
+            ++entries;
+        }
+    }
+    for (auto it = thumb_handlers.begin(); it != thumb_handlers.end();) {
+        if (off.count(it->second)) {
+            it = thumb_handlers.erase(it);
+            ++entries;
+        } else {
+            ++it;
+        }
+    }
+    return {off.size(), entries};
+}
+
+// Instructions the extras rewrite while the game runs that this native code does not check (msr/patches.cpp: added after
+// players built theirs): the functions covering them run on the interpreter, which reads them as memory has them.
+extern "C" void rt_code_patchable(const uint32_t* words, uint32_t count) {
+    if (!module || !count) return;
+    if (!spans) {
+        std::fprintf(stderr, "native: this native code was built before 2026-11-02: %u of the extras' instructions do not "
+                             "change the game until it is rebuilt (launcher, Native code)\n", count);
+        return;
+    }
+    std::vector<uint32_t> sorted(words, words + count);
+    std::sort(sorted.begin(), sorted.end());
+    const auto [functions, entries] = TurnOff(sorted, true, "PWR_CODE_MOD_TRACE");
+    std::fprintf(stderr, "native: %u of the extras' instructions: %zu functions (%zu entry points) run on the interpreter\n",
+                 count, functions, entries);
+}
+
 // A game mod changed the code (main.c): every recompiled function covering a changed word is turned off, so the
-// fallback interpreter runs the code as the mod left it there; calls between the functions go through Lookup, so the
-// others stay recompiled. Code a mod adds outside them has no recompiled code in any case.
+// fallback interpreter runs the code as the mod left it there. Code a mod adds outside them has no recompiled code in
+// any case.
 extern "C" void rt_code_changed(uint32_t base, const uint8_t* original, uint32_t original_size, const uint8_t* modded,
                                 uint32_t modded_size) {
     if (!module) return;
@@ -311,33 +377,9 @@ extern "C" void rt_code_changed(uint32_t base, const uint8_t* original, uint32_t
                              "recompiled code runs the game's own code there.\n", changed.size());
         return;
     }
-    std::unordered_set<MsrAot::Handler> off;
-    for (MsrAot::u32 i = 0; i < span_count; ++i) {
-        const auto& s = spans[i];
-        const auto it = std::lower_bound(changed.begin(), changed.end(), s.lo & ~3u);
-        if (it == changed.end() || *it >= s.hi) continue;
-        if (std::getenv("PWR_CODE_MOD_TRACE")) {
-            std::fprintf(stderr, "native: code mod: %08x in function %08x [%08x, %08x)\n", *it, s.entry, s.lo, s.hi);
-        }
-        if (const MsrAot::Handler h = Lookup(s.entry, s.thumb)) off.insert(h);
-    }
-    size_t entries = 0;
-    for (auto& h : arm_handlers) {
-        if (h && off.count(h)) {
-            h = nullptr;
-            ++entries;
-        }
-    }
-    for (auto it = thumb_handlers.begin(); it != thumb_handlers.end();) {
-        if (off.count(it->second)) {
-            it = thumb_handlers.erase(it);
-            ++entries;
-        } else {
-            ++it;
-        }
-    }
+    const auto [functions, entries] = TurnOff(changed, false, "PWR_CODE_MOD_TRACE");
     std::fprintf(stderr, "native: a game mod changes %zu words of the game's code: %zu functions (%zu entry points) run "
-                         "on the interpreter\n", changed.size(), off.size(), entries);
+                         "on the interpreter\n", changed.size(), functions, entries);
 }
 
 extern "C" int rt_has_code(uint32_t pc) {

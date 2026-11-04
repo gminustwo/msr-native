@@ -57,6 +57,8 @@ def main():
     shutil.copy2(ROOT / 'license.txt', out / 'LICENSE-GPL-2.0.txt')
     shutil.copy2(ROOT / 'externals/msr-imgui/LICENSE.txt', out / 'LICENSE-Dear-ImGui.txt')
     shutil.copy2(ROOT / 'native/runtime/shaders/fsr/LICENSE-AMD-FidelityFX.txt', out / 'LICENSE-AMD-FidelityFX.txt')
+    if 'libzstd.dll' in dlls:   # zstd (compressed game files), BSD: MSYS2 keeps its licence beside the package's files
+        shutil.copy2(MSYS / 'ucrt64/share/licenses/zstd/LICENSE', out / 'LICENSE-zstd.txt')
 
     archive = ROOT / 'dist' / f'{name}.zip'
     if archive.exists():

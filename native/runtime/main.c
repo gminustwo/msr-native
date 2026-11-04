@@ -18,6 +18,7 @@
  * The guest main thread runs on its own host thread; this thread owns the window and drives VBlank at 60 Hz. */
 #include "gpu.h"
 #include "runtime.h"
+#include "dump.h"
 #include "input.h"
 #include "msr/msr.h"
 #include <SDL_filesystem.h>
@@ -85,9 +86,8 @@ static int blz_decompress(uint8_t *buf, uint32_t packed, uint32_t *out_size) {
     return 0;
 }
 
-static int read_at(FILE *f, uint64_t off, void *dst, size_t n) {
-    return fseeko(f, (off_t)off, SEEK_SET) == 0 && fread(dst, 1, n, f) == n ? 0 : -1;
-}
+/* the game file, a plain or a compressed one (dump.c) */
+static int read_at(DumpFile *f, uint64_t off, void *dst, size_t n) { return dump_read(f, off, dst, n); }
 
 /* the code as the dump has it and as the game mods left it, when they changed it (rt_code_changed) */
 static uint8_t *g_code_orig, *g_code_mod; static uint32_t g_code_orig_size, g_code_mod_size, g_code_base;
@@ -96,13 +96,13 @@ static uint8_t *g_code_orig, *g_code_mod; static uint32_t g_code_orig_size, g_co
 uint32_t g_text_lo, g_text_hi;   /* the game's code (save states leave it out: state.c) */
 uint64_t g_code_hash;            /* the program as loaded, with the game mods' code: a save state must come from the same */
 static int load_dump(const char *path) {
-    FILE *f = fopen(path, "rb");
+    DumpFile *f = dump_open(path);   /* kept as g_dump: fs.c reads the RomFS through it */
     if (!f) { fprintf(stderr, "native: cannot open %s\n", path); return -1; }
     uint8_t h[0x200]; uint64_t ncch = 0;
     if (read_at(f, 0, h, sizeof h)) goto bad;
     if (!memcmp(h + 0x100, "NCSD", 4)) { ncch = (uint64_t)le32(h + 0x120) * MEDIA; if (read_at(f, ncch, h, sizeof h)) goto bad; }
-    if (memcmp(h + 0x100, "NCCH", 4)) { fprintf(stderr, "native: %s is not a 3DS game dump\n", path); fclose(f); return -1; }
-    if (!(h[0x188 + 7] & 4)) { fprintf(stderr, "native: the dump is encrypted; decrypt it first\n"); fclose(f); return -1; }
+    if (memcmp(h + 0x100, "NCCH", 4)) { fprintf(stderr, "native: %s is not a 3DS game dump\n", path); dump_close(f); return -1; }
+    if (!(h[0x188 + 7] & 4)) { fprintf(stderr, "native: the dump is encrypted; decrypt it first\n"); dump_close(f); return -1; }
     if (le64(h + 0x118) != 0x00040000001BB200ull) fprintf(stderr, "native: warning: program %016llx is not Samus Returns (USA)\n", (unsigned long long)le64(h + 0x118));
     uint8_t ex[0x800];
     if (read_at(f, ncch + 0x200, ex, sizeof ex)) goto bad;
@@ -130,7 +130,7 @@ static int load_dump(const char *path) {
             uint8_t *orig = malloc(n);
             if (orig) memcpy(orig, buf, n);
             int r = msr_mods_code(&buf, &modded, room);
-            if (r < 0) { free(orig); free(buf); fclose(f); fprintf(stderr, "native: a game mod's code patch does not fit this game\n"); return -1; }
+            if (r < 0) { free(orig); free(buf); dump_close(f); fprintf(stderr, "native: a game mod's code patch does not fit this game\n"); return -1; }
             if (r > 0 && orig) { g_code_orig = orig; g_code_orig_size = n; g_code_mod = malloc(modded); if (g_code_mod) memcpy(g_code_mod, buf, modded); g_code_mod_size = modded; g_code_base = text; }
             else free(orig);
             n = modded;
@@ -144,22 +144,22 @@ static int load_dump(const char *path) {
         fprintf(stderr, "native: .code %u bytes at %08x, main thread priority %d\n", n, text, g_main_prio);
         goto code_done;
     }
-    fprintf(stderr, "native: no .code in the ExeFS\n"); fclose(f); return -1;
+    fprintf(stderr, "native: no .code in the ExeFS\n"); dump_close(f); return -1;
 code_done:;
     /* RomFS: IVFC header, master hash, then level 3 (the file system) at the next level-3 block boundary */
     uint64_t romfs = ncch + (uint64_t)le32(h + 0x1B0) * MEDIA;
     uint8_t iv[0x60];
-    if (read_at(f, romfs, iv, sizeof iv) || memcmp(iv, "IVFC", 4)) { fprintf(stderr, "native: no RomFS in the dump\n"); fclose(f); return -1; }
+    if (read_at(f, romfs, iv, sizeof iv) || memcmp(iv, "IVFC", 4)) { fprintf(stderr, "native: no RomFS in the dump\n"); dump_close(f); return -1; }
     uint32_t master = le32(iv + 0x08), block = 1u << le32(iv + 0x4C);
     g_romfs_offset = romfs + ((0x60u + master + block - 1) & ~(uint64_t)(block - 1));
     g_romfs_size = le64(iv + 0x44);
     g_romfs_path = path;
     fprintf(stderr, "native: RomFS level 3 at %llx, %llu bytes\n", (unsigned long long)g_romfs_offset, (unsigned long long)g_romfs_size);
-    if (msr_romfs_open(path, g_romfs_offset, g_romfs_size)) { fclose(f); return -1; }   /* with the game mods' files (fs.c reads it) */
-    fclose(f);
+    if (msr_romfs_open(path, g_romfs_offset, g_romfs_size)) { dump_close(f); return -1; }   /* with the game mods' files (fs.c reads it) */
+    g_dump = f;
     return 0;
 bad:
-    fprintf(stderr, "native: %s is damaged or truncated\n", path); fclose(f); return -1;
+    fprintf(stderr, "native: %s is damaged or truncated\n", path); dump_close(f); return -1;
 }
 
 static int exists(const char *p) { struct stat st; return stat(p, &st) == 0; }
@@ -347,6 +347,7 @@ int main(int argc, char **argv) {
     msr_apply_patches();
     if (!exists(module)) { fprintf(stderr, "native: no recompiled code at %s: build it in the launcher (Native code)\n", module); return 1; }
     if (rt_module_load(module)) return 1;
+    msr_patches_module_loaded();
     if (g_code_orig) {   /* a game mod changed the code: the functions it changed run on the interpreter */
         rt_code_changed(g_code_base, g_code_orig, g_code_orig_size, g_code_mod, g_code_mod_size);
         free(g_code_orig); free(g_code_mod); g_code_orig = g_code_mod = NULL;

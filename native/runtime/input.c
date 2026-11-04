@@ -78,7 +78,8 @@ int input_pad_control(int button) { for (int c = 0; c < C_COUNT; c++) if (pad_bi
    HUD shows, if the pad is not a Nintendo one (msr_menu_buttons, glyphs.cpp; a Nintendo pad's labels already are the
    game's layout), the bottom face button is 3DS A (choose) and the right one 3DS B (back), whatever they do in play;
    the buttons bound to A and B for play do nothing there. A button keeps what it pressed until it comes up
-   (pad_held), so a menu closing under it does not make it another button. */
+   (pad_held), so a menu closing under it does not make it another button. The Controls tab's Nintendo menu layout
+   turns this off for every pad (msr_menu_buttons is then 0: menus take the bindings, as play does). */
 int input_pad_bound(int c, int menu) {
     if (c < 0 || c >= C_COUNT) return -1;
     if (menu && (c == C_A || c == C_B)) return c == C_A ? SDL_CONTROLLER_BUTTON_A : SDL_CONTROLLER_BUTTON_B;
