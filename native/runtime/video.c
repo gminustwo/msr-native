@@ -264,7 +264,7 @@ static int gpu_init(void) {
     push_desc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(dev, "vkCmdPushDescriptorSetKHR");
     if (!push_desc) return -1;
     if (img_make(&tex_top, TOP_W, SCR_H, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
-        img_make(&tex_bot, BOT_W, SCR_H, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) return -1;
+        img_make(&tex_bot, BOT_W, SCR_H, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return -1;
     VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = UP_TOAST + sizeof toast_px, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
     VK(vkCreateBuffer(dev, &bi, NULL, &up_buf));
     VkMemoryRequirements mr; vkGetBufferMemoryRequirements(dev, up_buf, &mr);
@@ -767,13 +767,35 @@ static const Img *hi_screen(int i, const ScreenSource *s, int screen_w) {
     Img *t = &hi_scr[i];
     if (t->w != lh || t->h != lw) {
         img_free(t);
-        if (img_make(t, lh, lw, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) return NULL;
+        if (img_make(t, lh, lw, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return NULL;
     }
     begin_pass(t, VK_ATTACHMENT_LOAD_OP_DONT_CARE);
     gpu_quad_view(pipe_rgba, v, lw, lh, VK_IMAGE_LAYOUT_GENERAL, 1, (Rect){ 0, 0, (float)lh, (float)lw, 1 }, (float)lh, (float)lw, 0, 0, NULL);
     vkCmdEndRendering(cmdbuf);
     barrier_img(t->img, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
     return t;
+}
+
+/* Samus Returns, R held (missiles): the HUD's beam slots from the bottom screen as it was before (msr_beams_held). Each
+   frame R is not held, the slots' column (x 250-320, every row) is copied into beam_copy, at the size of the bottom
+   screen in use; while it is held, the beam slots' quads sample that copy (the live screen if it has none). */
+static Img beam_copy; static int beam_copy_ok;
+static const Img *beam_slots(const Img *sb) {
+    if (msr_beams_held()) return beam_copy_ok && beam_copy.w == sb->w && beam_copy.h == sb->h ? &beam_copy : sb;
+    if (beam_copy.w != sb->w || beam_copy.h != sb->h) {
+        img_free(&beam_copy); beam_copy_ok = 0;
+        if (img_make(&beam_copy, sb->w, sb->h, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT)) { memset(&beam_copy, 0, sizeof beam_copy); return sb; }
+    }
+    const uint32_t x0 = sb->w * 250 / BOT_W;
+    barrier_img(sb->img, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_READ_BIT);
+    barrier_img(beam_copy.img, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_ACCESS_SHADER_READ_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+    VkImageCopy ic = { .srcSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .srcOffset = { (int32_t)x0, 0, 0 },
+                       .dstSubresource = { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 }, .dstOffset = { (int32_t)x0, 0, 0 }, .extent = { sb->w - x0, sb->h, 1 } };
+    vkCmdCopyImage(cmdbuf, sb->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, beam_copy.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &ic);
+    barrier_img(sb->img, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT);
+    barrier_img(beam_copy.img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT);
+    beam_copy_ok = 1;
+    return sb;
 }
 
 static void upload(const Img *t, VkDeviceSize off);
@@ -1034,6 +1056,7 @@ int video_frame(void) {
         vkCmdPipelineBarrier(cmdbuf, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
         const Img *st = hi_screen(0, &top, TOP_W), *sb = hi_screen(1, &bottom, BOT_W);
         if (!st) st = &tex_top; if (!sb) sb = &tex_bot;
+        const Img *sbeams = single ? beam_slots(sb) : sb;   /* R held: the beam slots before it (outside the passes) */
         if (toast_text && (toast_dirty || tex_toast.w != (uint32_t)(TOAST_W * ks))) {
             int w = TOAST_W * ks, h = TOAST_H * ks; ui_img(&tex_toast, w, h);
             fill(toast_px, w, 0, 0, w, h, 0x101820, 210);
@@ -1058,7 +1081,7 @@ int video_frame(void) {
         }
         if (mf.count) {
             vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, hdr_mode ? pipe_msr_ui : pipe_msr);
-            for (int i = 0; i < mf.count; i++) msr_quad(&mf.quads[i], sb, W, H);
+            for (int i = 0; i < mf.count; i++) msr_quad(&mf.quads[i], mf.quads[i].source ? sbeams : sb, W, H);
         }
         if (!msr_overlay_visible() && now_s() < toast_until && tex_toast.img)   /* layout label, top centre (pixel for pixel) */
             gpu_quad(hdr_mode ? pipe_ui : pipe, &tex_toast, (Rect){ floorf((W - (float)tex_toast.w) / 2), 12, (float)tex_toast.w, (float)tex_toast.h, 1 }, W, H, 0, 1, NULL);

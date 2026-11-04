@@ -51,7 +51,8 @@ typedef struct {
     float style[4];   /* opacity, key low (mode 3: gain), key high, mode */
     int feather;      /* soft edge in percent of the quad; bits 8-11 keep the left, top, right, bottom edges hard */
     int circle;       /* circular mask radius in percent (0: none) */
-    int pad[2];
+    int source;       /* 1: the beam slots as held (video.c's copy of the bottom screen before R, msr_beams_held) */
+    int pad;
     float color[4];   /* fill colour */
 } MsrQuad;
 
@@ -68,6 +69,9 @@ int  msr_single(void);
    host time (s) and the 3DS buttons (Start opens the pause menu), lays out a ww x wh window. */
 void msr_compose(const uint8_t *bottom, double now, unsigned buttons, float ww, float wh, MsrFrame *out);
 void msr_single_layout(float ww, float wh, float top[4], float panel[4]);
+/* R held (missiles): the HUD's beam slots come from video.c's copy of the bottom screen made before (quads with
+   source 1); video.c copies the slots' column each frame this is 0 */
+int  msr_beams_held(void);
 int  msr_panel_visible(void);
 /* pica_vk: the clip-space scale of the top screen's world draws (x down the screen, y across: widescreen and zoom) */
 void msr_world_scale(float *sx, float *sy);

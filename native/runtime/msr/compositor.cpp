@@ -82,6 +82,8 @@ struct State {
     std::array<s64, 3> beam_seen_us{-1, -1, -1}, beam_empty_us{-1, -1, -1};
     bool beams_greyed = false;
     float beam_grey = 0;
+    bool beams_held = false;   // R held: the beam slots as they were (msr_compose)
+    s64 beams_up_us = -1;      // R came up then (-1: still held)
     unsigned buttons = 0;
 } st;
 
@@ -132,21 +134,24 @@ void Consume(const BC::Image& image, s64 now) {
             if (since < 0 || since > now) since = now;
             return now - since;
         };
-        int owned = P::beam_slots.load(std::memory_order_relaxed);
-        for (std::size_t i = 0; i < st.beam_seen_us.size(); ++i) {
-            const int bit = 1 << i;
-            if (result.beams.present & bit) {
-                st.beam_empty_us[i] = -1;
-                if (held(st.beam_seen_us[i]) >= 100'000) owned |= bit;
-            } else {
-                st.beam_seen_us[i] = -1;
-                if (result.beams.greyed) st.beam_empty_us[i] = -1;
-                else if (held(st.beam_empty_us[i]) >= 1'000'000) owned &= ~bit;
+        if (!st.beams_held) {   // (R held: the slots show the missiles; the beams are kept as they were)
+            int owned = P::beam_slots.load(std::memory_order_relaxed);
+            for (std::size_t i = 0; i < st.beam_seen_us.size(); ++i) {
+                const int bit = 1 << i;
+                if (result.beams.present & bit) {
+                    st.beam_empty_us[i] = -1;
+                    if (held(st.beam_seen_us[i]) >= 100'000) owned |= bit;
+                } else {
+                    st.beam_seen_us[i] = -1;
+                    if (result.beams.greyed) st.beam_empty_us[i] = -1;
+                    else if (held(st.beam_empty_us[i]) >= 1'000'000) owned &= ~bit;
+                }
             }
+            P::beam_slots.store(owned, std::memory_order_relaxed);
+            // the lit slot, greyed too (Morph Ball: the beam can still be changed); unclear: as it was
+            if (result.beams.lit >= 0) P::beam_slot.store(result.beams.lit, std::memory_order_relaxed);
+            st.beams_greyed = result.beams.greyed;
         }
-        P::beam_slots.store(owned, std::memory_order_relaxed);
-        if (!result.beams.greyed) P::beam_slot.store(result.beams.lit, std::memory_order_relaxed);
-        st.beams_greyed = result.beams.greyed;
         if (result.marker.found) {
             // Samus's marker, not something else as red seen while it fades (2026-11-03: a red map pin, which the
             // classifier no longer counts): taken near where it was or the map's middle, where the game keeps it;
@@ -264,6 +269,7 @@ extern "C" int msr_single(void) { return P::enabled.load(std::memory_order_relax
 extern "C" int msr_panel_visible(void) { return P::panel_visible.load(std::memory_order_relaxed); }
 
 extern "C" int msr_world_in_play(void) { return st.in_play ? 1 : 0; }
+extern "C" int msr_beams_held(void) { return st.beams_held ? 1 : 0; }
 
 extern "C" void msr_world_scale(float* sx, float* sy) {
     const float zoom = P::world_zoom.load(std::memory_order_relaxed);
@@ -278,6 +284,18 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
     // HID Start rising: the game sees the press (the emulator's HID sets this as the game reads it)
     if ((buttons & 8) && !(st.buttons & 8)) P::start_pressed_us.store(now_us, std::memory_order_relaxed);
     st.buttons = buttons;
+    // R held (missiles, Power Bombs): the game draws them in the beam slots, and the HUD keeps the beams as they were
+    // (2026-11-03, the user: "it should just stay with whatever beam you were using"; the slots are the touch screen's
+    // missile choice meanwhile, the game's own screen is not changed). video.c draws them from its copy of the bottom
+    // screen made before R, and their classification waits. From a press while the HUD shows, until 350 ms after R
+    // comes up: the beams come back on the next frame, but the lit one flashes and the Grapple slot fades in for ~20.
+    if (buttons & 0x100) {
+        if (static_cast<P::Bottom>(P::bottom.load(std::memory_order_relaxed)) == P::Bottom::Hud) st.beams_held = true;
+        st.beams_up_us = -1;
+    } else if (st.beams_held) {
+        if (st.beams_up_us < 0) st.beams_up_us = now_us;
+        else if (now_us - st.beams_up_us >= 350'000) st.beams_held = false;
+    }
     if (bottom) Consume(BC::Image{bottom, false}, now_us);
 
     Rect layout_top, layout_panel;
@@ -410,6 +428,7 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
                 Region(Source(static_cast<float>(x0), static_cast<float>(y0), static_cast<float>(x1),
                               static_cast<float>(y1)),
                        x, y, size, size, i == lit ? lit_icon : i == 2 ? unlit_grapple : unlit_icon);
+                quads.back().source = st.beams_held ? 1 : 0;   // R held: the beams before it (video.c)
                 x += size + 4.f * unit;
             }
         }

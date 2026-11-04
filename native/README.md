@@ -30,7 +30,14 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   for it, and taken far from its last place only once it holds there 0.75 s; the counters), menus (a panel, the title menus without
   their backdrop), prompts and the gallery layout are drawn over the view by `msr.vert`/`msr.frag`. `pica_vk.c`
   squeezes the top screen's world draws to 16:9 and applies the camera zoom in clip space, and leaves out the title
-  menus' backdrop quads. The mouse touches the panel while it shows.
+  menus' backdrop quads. The mouse touches the panel while it shows. While R is held (missiles, Power Bombs) the HUD
+  keeps the beams in its beam slots (2026-11-03): the game draws the missiles in them then (the touch screen's choice
+  of missile), so `video.c` draws the slots from its copy of the bottom screen's slot column, made each frame R is not
+  held, from a press while the HUD shows until 350 ms after R comes up (the beams flash back in), and their
+  classification waits; the missile counter lights as the game lights it. In Morph Ball the game greys the beam row,
+  but the beam can still be changed: the lit slot is then the one with by far the most of its pixels over 120
+  (`bottom_classifier.h` ReadBeamSlots; before, the HUD kept its highlight on the old slot, over a dimmed icon, and
+  RT tapped the same slot again).
 - Input: RT taps the next beam slot, LT the minimap (Morph Ball), as injected touches while the HUD shows (C and
   Left Shift too, and the mouse wheel: down the next beam, up the one before); the pad's Back/Select opens the settings
   panel (`select_layout`: `settings`, or true for the next layout, false for 3DS Select). Every pad SDL can map is

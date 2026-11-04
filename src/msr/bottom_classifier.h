@@ -195,7 +195,11 @@ inline Presentation::Page TitleMenuPage(const Image& image) {
 /// middle entirely, but a lit slot is never empty. One slot is always lit, reaching 255. In Morph
 /// Ball the game greys the whole row out: the lit slot dims (brightest 156-216), sometimes below
 /// the lit test, and the unlit icons fade into their slots (30-34, read as empty). `greyed`
-/// says so: no slot is lit at full brightness.
+/// says so: no slot is lit at full brightness. The beam can still be changed then, so the lit
+/// slot is the one with by far the most samples brighter than 120 (265-420 of 1024, 279-366 at
+/// 9x with the HD texture pack; unlit ones 0-89, the Grapple slot's stripes the most), and -1
+/// while that is unclear (one fading out, the next in). 2026-11-03, the user: cycling the beams
+/// in Morph Ball left the HUD's highlight on the old slot ("a shadow over it").
 inline constexpr std::array<std::array<int, 4>, 3> BeamSlotRects = {{
     {253, 13, 317, 77},   // Aeion ability: the usual beam
     {253, 88, 317, 152},  // Ice Beam
@@ -209,6 +213,7 @@ struct BeamSlots {
 inline BeamSlots ReadBeamSlots(const Image& image) {
     BeamSlots beams;
     int lit_peak = 0;
+    std::array<int, BeamSlotRects.size()> soft{};
     for (int i = 0; i < static_cast<int>(BeamSlotRects.size()); ++i) {
         const auto& [x0, y0, x1, y1] = BeamSlotRects[i];
         int bright = 0, total = 0, peak = 0;
@@ -216,6 +221,7 @@ inline BeamSlots ReadBeamSlots(const Image& image) {
             for (int x = x0; x < x1; x += 2) {
                 const int brightness = image.Brightness(x, y);
                 bright += brightness > 200;
+                soft[i] += brightness > 120;
                 peak = std::max(peak, brightness);
                 ++total;
             }
@@ -239,6 +245,18 @@ inline BeamSlots ReadBeamSlots(const Image& image) {
         }
     }
     beams.greyed = lit_peak < 240;
+    if (beams.greyed) {
+        int best = 0;
+        for (int i = 1; i < static_cast<int>(soft.size()); ++i) {
+            if (soft[i] > soft[best]) best = i;
+        }
+        int second = 0;
+        for (int i = 0; i < static_cast<int>(soft.size()); ++i) {
+            if (i != best) second = std::max(second, soft[i]);
+        }
+        beams.lit = soft[best] >= 160 && soft[best] >= 2 * second ? best : -1;
+        if (beams.lit >= 0) beams.present |= 1 << beams.lit;
+    }
     return beams;
 }
 
