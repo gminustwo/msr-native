@@ -21,7 +21,7 @@
 param([int]$Seconds = 15, [string]$Shot = 'n', [string]$GameArgs = '--mute', [string]$Keys = '', [int]$After = 0, [string]$Folder = '',
       [string]$Exe = '')
 $root = Split-Path (Split-Path $PSScriptRoot)
-$exe = if ($Exe) { $Exe } else { Join-Path $root 'build\msr-native.exe' }
+$program = if ($Exe) { $Exe } else { Join-Path $root 'build\msr-native.exe' }   # not $exe: PowerShell names ignore case, that is -Exe
 $run = if ($Folder) { $Folder } elseif ($Exe) { Split-Path $Exe } else { Join-Path $root 'test' }
 $out = Join-Path $run 'shots'
 New-Item -ItemType Directory -Force $out | Out-Null
@@ -59,7 +59,7 @@ $env:SDL_WINDOW_NO_ACTIVATION_WHEN_SHOWN = '1'   # never takes the foreground
 # -GameArgs '' starts the launcher (its user folder: test\, by MSR_NATIVE_HOME); its Play starts the game as a child,
 # whose window the steps and shots then use
 if ($Exe) { Remove-Item Env:MSR_NATIVE_HOME -ErrorAction SilentlyContinue } else { $env:MSR_NATIVE_HOME = $run }
-$start = @{ FilePath = $exe; WorkingDirectory = $run; PassThru = $true; NoNewWindow = $true; RedirectStandardError = (Join-Path $run 'shot.log') }
+$start = @{ FilePath = $program; WorkingDirectory = $run; PassThru = $true; NoNewWindow = $true; RedirectStandardError = (Join-Path $run 'shot.log') }
 if ($GameArgs -ne '') { $start.ArgumentList = $GameArgs }
 $p = Start-Process @start
 function Kids { @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessId }) }

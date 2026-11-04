@@ -994,6 +994,9 @@ int video_frame(void) {
         was_visible = vis;
         if (swap && gpu_ok && hdr_wanted() != (hdr_mode != 0)) { if (recreate_swapchain()) return 0; }
     }
+    /* minimised, the swapchain waits at size 0 (create_swapchain). SDL keeps the window's size through a minimise, so
+       the size check above never sees the restore: try again once the window is back, or the picture froze for good */
+    if (swap && (!sc_extent.width || !sc_extent.height) && !(SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED)) { if (recreate_swapchain()) return 0; }
     if (!swap || !sc_extent.width || !sc_extent.height) return 1;
 
     vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX);
