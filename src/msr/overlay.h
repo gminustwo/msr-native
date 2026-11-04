@@ -142,6 +142,13 @@ struct LauncherSnapshot {
     bool can_play = false;
     bool can_browse = false; ///< A file dialog is there
     std::string folder;      ///< The user folder (saves, settings, mods)
+    /// A newer release (launcher.cpp looks when it starts): offered, being put in place, or failed
+    enum class Update { None, Available, Working, Failed };
+    Update update = Update::None;
+    std::string update_version;      ///< "0.2.0"
+    std::string update_note;         ///< Its size, the download's progress, or what failed
+    float update_progress = -1.f;    ///< The download's progress, 0..1, or -1
+    bool update_installable = false; ///< The launcher can put it in place (else: its download page)
 };
 
 struct OverlayAction {
@@ -175,6 +182,8 @@ struct OverlayAction {
         LauncherBrowse,   ///< Choose the game file with a file dialog
         LauncherGame,     ///< The game file typed in: `text`
         LauncherFolder,   ///< Open the user folder
+        LauncherUpdate,   ///< Download the newer release and put it in place
+        LauncherUpdatePage, ///< Open the newer release's page (what's new; its download)
     };
     Kind kind;
     EmulatorSettings emulator{};

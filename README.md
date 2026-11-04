@@ -65,6 +65,22 @@ wsl -d Ubuntu --cd /mnt/d/Games/pcports/3ds_ports/msr-native -- env MSR_JOBS=8 b
 The version is `MSR_NATIVE_VERSION` in `native/CMakeLists.txt`. Each package holds the program, the recompiler
 (`recomp/`), `tools/package/README.txt` and the licences.
 
+Updates: the launcher checks the releases of `MSR_UPDATE_REPO` (`native/CMakeLists.txt`, `gminustwo/msr-native`) on
+GitHub each time it starts, and offers the newest one above its own version that has the player's package (Update now,
+What's new). Update downloads it, checks it against the SHA-256 digest GitHub gives each release file, and puts its
+files where the installation has them (Windows: the old ones renamed aside and deleted by the new version; Linux: the
+AppImage replaced at the same path), then starts the new version. The user folder is not touched, so the native code
+built from the player's dump keeps working; only a version whose `aot_runtime.h` changed asks for a rebuild. To publish
+an update:
+
+- raise `MSR_NATIVE_VERSION`, build and package as above;
+- make a GitHub release tagged `v<version>` with the two packages as they are named
+  (`msr-native-<version>-windows-x64.zip`, `msr-native-<version>-x86_64.AppImage`). Pre-releases are offered too.
+
+The releases must be public: a private repository's are invisible to the players' launchers. `MSR_UPDATE_URL=<url>`
+reads another release list (GitHub's format; `file://` works, for tests), `MSR_UPDATE_URL=off` skips the check, and
+`user/msr/update.log` records what it did.
+
 ## The game's code
 
 `tools/msr/recomp/build_module.py` checks the dump, recompiles its code and writes the library. Supported dump:

@@ -461,6 +461,8 @@ extern "C" void msr_overlay_frame(void) {
         case Kind::LauncherBrowse:
         case Kind::LauncherGame:
         case Kind::LauncherFolder:
+        case Kind::LauncherUpdate:
+        case Kind::LauncherUpdatePage:
             msr_launcher_action(static_cast<int>(action.kind), action.text.c_str());
             break;
         case Kind::Quit:

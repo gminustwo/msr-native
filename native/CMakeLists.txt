@@ -5,6 +5,9 @@
 cmake_minimum_required(VERSION 3.16)
 project(msr_native C CXX)
 set(MSR_NATIVE_VERSION "0.1.0")   # the launcher shows it; the native code's module.json records it
+# Where the launcher looks for newer releases (GitHub owner/repository; its releases must be public): their packages,
+# as tools/package names them, update the installation in place (launcher.cpp)
+set(MSR_UPDATE_REPO "gminustwo/msr-native" CACHE STRING "GitHub repository whose releases the launcher offers as updates")
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_CXX_STANDARD 20)
 if(NOT CMAKE_BUILD_TYPE)
@@ -83,7 +86,7 @@ add_executable(msr-native
 target_include_directories(msr-native PRIVATE runtime/msr/compat runtime ${SHO} ${MSR_AOT_DIR}
                            ${CMAKE_CURRENT_SOURCE_DIR}/../src)
 target_compile_definitions(msr-native PRIVATE _FILE_OFFSET_BITS=64 MSR_AOT_RUNTIME_SHA256="${MSR_AOT_RUNTIME_SHA256}" MSR_NATIVE
-                           MSR_NATIVE_VERSION="${MSR_NATIVE_VERSION}")
+                           MSR_NATIVE_VERSION="${MSR_NATIVE_VERSION}" MSR_UPDATE_REPO="${MSR_UPDATE_REPO}")
 # Saved vertex shaders (pwr_shaders.bin) stay valid while their generator is the same: its source's hash, not the build time
 file(READ ${CMAKE_CURRENT_SOURCE_DIR}/runtime/pica_vsgen.c MSR_VSGEN_TEXT)
 string(REPLACE "\r" "" MSR_VSGEN_TEXT "${MSR_VSGEN_TEXT}")

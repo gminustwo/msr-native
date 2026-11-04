@@ -23,6 +23,14 @@ First start
 The same menu opens in the game with F1 or the controller's Select / View / Back button.
 The launcher comes back when the game closes.
 
+Updates
+-------
+When a new version is out, the launcher's Game tab says so when it starts. "Update now"
+downloads it and replaces this program's files where they are (the same folder, or the same
+AppImage), then starts the new version. Your saves, settings, mods and the native code are
+kept: you build the native code once, and an update only asks you to rebuild it in the rare
+case the new version needs it. "What's new" opens the release's page.
+
 Your files
 ----------
 Everything goes in the user folder ("Open the user folder" on the Game tab):

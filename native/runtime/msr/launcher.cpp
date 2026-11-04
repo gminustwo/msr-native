@@ -7,7 +7,9 @@
 //     capstone) are downloaded on the first build with curl, pinned by SHA-256, into user/msr/recomp-kit/, as the
 //     emulator-based build's launcher does (its msr_recomp.cpp);
 //   - Play: this program again, with --play and the display settings (settings.ini [native]), in the same folder; the
-//     launcher hides until it ends and starts it again when its menu's Restart asks (exit code 75).
+//     launcher hides until it ends and starts it again when its menu's Restart asks (exit code 75);
+//   - updates: a newer release on GitHub, offered when the launcher starts and put in place of this installation's own
+//     files (the updates section below).
 // The user folder: beside the program (Windows, a portable folder; Linux when a user/ folder is there, also beside the
 // AppImage), else the system's (%LOCALAPPDATA%\msr-native, ~/.local/share/msr-native); MSR_NATIVE_HOME overrides it.
 #include <algorithm>
@@ -21,6 +23,7 @@
 #include <fstream>
 #include <functional>
 #include <mutex>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -33,6 +36,7 @@
 #else
 #include <fcntl.h>
 #include <signal.h>
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -43,6 +47,9 @@
 
 #ifndef MSR_NATIVE_VERSION
 #define MSR_NATIVE_VERSION "dev"
+#endif
+#ifndef MSR_UPDATE_REPO
+#define MSR_UPDATE_REPO "gminustwo/msr-native"
 #endif
 
 extern "C" {
@@ -460,6 +467,15 @@ struct State {
     Child game_process;
     bool quit = false;
     bool dirty = true;    // the overlay's snapshot needs updating
+    // a newer release (the updates section below)
+    Snapshot::Update update = Snapshot::Update::None;
+    std::string update_version, update_note, update_page, update_url, update_sha256;
+    std::uint64_t update_size = 0;
+    float update_progress = -1.f;
+    bool update_installable = false;
+    std::thread update_checker, update_worker;
+    Child update_tool;       // the update's current process (curl, tar): stopped when the launcher closes
+    fs::path restart_into;   // after the window closes: this program's new version (an update)
 } S;
 
 fs::path KitFolder() { return S.user / "msr" / "recomp-kit"; }
@@ -693,7 +709,7 @@ void StartBuild() {
     std::string game;
     {
         std::scoped_lock lock{S.lock};
-        if (S.building || S.game.empty() || !S.game_note.empty()) return;
+        if (S.building || S.game.empty() || !S.game_note.empty() || S.update == Snapshot::Update::Working) return;
         S.building = true;
         S.cancel = false;
         S.code = Code::Building;
@@ -778,6 +794,453 @@ void OpenFolder(const fs::path& dir) {
 #endif
 }
 
+// ---- updates: a newer release, downloaded and put in place of this installation's own files ----
+// The releases of MSR_UPDATE_REPO on GitHub (native/CMakeLists.txt; public releases), each with the packages
+// tools/package makes: msr-native-<version>-windows-x64.zip (the program, its libraries and recomp/, in one folder) and
+// msr-native-<version>-x86_64.AppImage. The launcher looks when it starts and offers the newest release above its own
+// version that has this system's package (pre-releases too). Update downloads it, checks its SHA-256 against the
+// release's digest, and then
+//   - Windows: unpacks it (tar) into user/msr/update/; each file it has goes where the installation has it: the old one
+//     renamed to <name>.updating-old (a running program and its libraries can be renamed, not overwritten), the new one
+//     copied in; recomp/'s files the package no longer has are retired the same way; any failure puts the old files
+//     back. The new program starts and deletes the old files.
+//   - Linux: writes the new AppImage beside the running one and renames it over it (the same path: shortcuts, Steam's
+//     too, keep working), then runs it in this process's place.
+// The user folder is never touched: saves, settings, mods, the game file and the native code built from it, which
+// stays valid unless the new version changes aot_runtime.h (CheckCode then asks for a rebuild). MSR_UPDATE_URL: another
+// address for the release list (any curl URL, file:// for tests; "off": no check). The log: user/msr/update.log.
+struct Json {
+    enum Type { Null, Bool, Number, String, Array, Object } type = Null;
+    bool b = false;
+    double n = 0;
+    std::string s;
+    std::vector<Json> items;
+    std::vector<std::pair<std::string, Json>> members;
+    const Json* Get(const char* key) const {
+        for (const auto& [k, v] : members)
+            if (k == key) return &v;
+        return nullptr;
+    }
+    std::string Str(const char* key) const { const Json* v = Get(key); return v && v->type == String ? v->s : std::string{}; }
+    bool Flag(const char* key) const { const Json* v = Get(key); return v && v->type == Bool && v->b; }
+    double Num(const char* key) const { const Json* v = Get(key); return v && v->type == Number ? v->n : 0.; }
+};
+struct JsonReader {
+    const std::string& t;
+    std::size_t i = 0;
+    bool ok = true;
+    void Space() { while (i < t.size() && (t[i] == ' ' || t[i] == '\t' || t[i] == '\n' || t[i] == '\r')) i++; }
+    bool Word(const char* w) {
+        const std::size_t n = std::strlen(w);
+        if (t.compare(i, n, w) != 0) return false;
+        i += n;
+        return true;
+    }
+    std::string Text() {   // at the opening quote
+        std::string out;
+        for (i++; i < t.size() && t[i] != '"'; ) {
+            const char c = t[i++];
+            if (c != '\\' || i >= t.size()) { out += c; continue; }
+            const char e = t[i++];
+            if (e == 'n') out += '\n';
+            else if (e == 't') out += '\t';
+            else if (e == 'r') out += '\r';
+            else if (e == 'b') out += '\b';
+            else if (e == 'f') out += '\f';
+            else if (e == 'u') {   // UTF-8 (a surrogate pair's halves each as they are: rare in release lists)
+                unsigned cp = 0;
+                for (int k = 0; k < 4 && i < t.size(); k++) {
+                    const char h = t[i++];
+                    cp = cp * 16 + static_cast<unsigned>(h >= '0' && h <= '9' ? h - '0' : (h | 0x20) - 'a' + 10);
+                }
+                if (cp < 0x80) out += static_cast<char>(cp);
+                else if (cp < 0x800) { out += static_cast<char>(0xC0 | cp >> 6); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+                else { out += static_cast<char>(0xE0 | cp >> 12); out += static_cast<char>(0x80 | (cp >> 6 & 0x3F)); out += static_cast<char>(0x80 | (cp & 0x3F)); }
+            } else out += e;   // \" \\ \/
+        }
+        if (i >= t.size()) ok = false;
+        else i++;
+        return out;
+    }
+    Json Value(int depth = 0) {
+        Json v;
+        Space();
+        if (i >= t.size() || depth > 64) { ok = false; return v; }
+        const char c = t[i];
+        if (c == '{' || c == '[') {
+            const bool object = c == '{';
+            v.type = object ? Json::Object : Json::Array;
+            i++;
+            Space();
+            if (i < t.size() && t[i] == (object ? '}' : ']')) { i++; return v; }
+            while (ok) {
+                Space();
+                if (object) {
+                    if (i >= t.size() || t[i] != '"') { ok = false; break; }
+                    std::string key = Text();
+                    Space();
+                    if (i >= t.size() || t[i] != ':') { ok = false; break; }
+                    i++;
+                    v.members.emplace_back(std::move(key), Value(depth + 1));
+                } else {
+                    v.items.push_back(Value(depth + 1));
+                }
+                Space();
+                if (i < t.size() && t[i] == ',') { i++; continue; }
+                if (i < t.size() && t[i] == (object ? '}' : ']')) { i++; break; }
+                ok = false;
+            }
+        } else if (c == '"') {
+            v.type = Json::String;
+            v.s = Text();
+        } else if (Word("true")) {
+            v.type = Json::Bool;
+            v.b = true;
+        } else if (Word("false")) {
+            v.type = Json::Bool;
+        } else if (!Word("null")) {
+            char* end = nullptr;
+            v.type = Json::Number;
+            v.n = std::strtod(t.c_str() + i, &end);
+            const std::size_t used = static_cast<std::size_t>(end - (t.c_str() + i));
+            if (!used) ok = false;
+            i += used;
+        }
+        return v;
+    }
+};
+
+// "v1.2.3", "1.2.3-test" -> {1, 2, 3}; empty when it is no version
+std::vector<int> VersionOf(std::string s) {
+    if (!s.empty() && (s[0] == 'v' || s[0] == 'V')) s.erase(0, 1);
+    std::vector<int> parts;
+    for (std::size_t i = 0; i < s.size() && s[i] >= '0' && s[i] <= '9';) {
+        int n = 0;
+        while (i < s.size() && s[i] >= '0' && s[i] <= '9') n = n * 10 + (s[i++] - '0');
+        parts.push_back(n);
+        if (i < s.size() && s[i] == '.') i++;
+        else break;
+    }
+    return parts;
+}
+bool Newer(const std::vector<int>& a, const std::vector<int>& b) {
+    for (std::size_t k = 0; k < std::max(a.size(), b.size()); k++) {
+        const int x = k < a.size() ? a[k] : 0, y = k < b.size() ? b[k] : 0;
+        if (x != y) return x > y;
+    }
+    return false;
+}
+
+fs::path UpdateFolder() { return S.user / "msr" / "update"; }
+void UpdateLog(const std::string& text) {
+    std::error_code e;
+    fs::create_directories(UpdateFolder().parent_path(), e);
+    std::ofstream f(S.user / "msr" / "update.log", std::ios::binary | std::ios::app);
+    f << text << "\n";
+    std::fprintf(stderr, "launcher: update: %s\n", text.c_str());
+}
+void UpdateStatus(Snapshot::Update state, const std::string& note, float progress = -1.f) {
+    std::scoped_lock lock{S.lock};
+    S.update = state;
+    S.update_note = note;
+    S.update_progress = progress;
+    S.dirty = true;
+}
+std::string Megabytes(std::uint64_t bytes) {
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%.1f MB", static_cast<double>(bytes) / (1 << 20));
+    return buf;
+}
+
+// a tool for the update (curl, tar), waited for; with `file` and `total`, the file's growth as the progress
+bool UpdateTool(const std::vector<std::string>& argv, const fs::path& file = {}, std::uint64_t total = 0) {
+    std::string cmd;
+    for (const auto& a : argv) cmd += (cmd.empty() ? "" : " ") + a;
+    UpdateLog("> " + cmd);
+    Child c;
+    if (!Spawn(argv, {}, false, S.user / "msr" / "update.log", true, c)) { UpdateLog("could not start"); return false; }
+    {
+        std::scoped_lock lock{S.lock};
+        S.update_tool = c;
+    }
+    int code;
+    while ((code = Poll(c, false)) == -1) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        if (file.empty() || !total) continue;
+        std::error_code e;
+        const std::uint64_t size = fs::exists(file, e) ? fs::file_size(file, e) : 0;
+        UpdateStatus(Snapshot::Update::Working, "Downloading: " + Megabytes(size) + " of " + Megabytes(total),
+                     static_cast<float>(std::min(size, total)) / static_cast<float>(total));
+    }
+    {
+        std::scoped_lock lock{S.lock};
+        S.update_tool = Child{};
+    }
+    Close(c);
+    if (code) UpdateLog("(exit " + std::to_string(code) + ")");
+    return code == 0;
+}
+
+// The package this system takes, and whether this installation can be updated in place (a release's: its recomp/
+// beside the program, or an AppImage, in a folder it can write to; not a development build)
+const char* PackageSuffix() {
+#ifdef _WIN32
+    return "-windows-x64.zip";
+#else
+    return "-x86_64.AppImage";
+#endif
+}
+bool Installable() {
+    std::error_code e;
+#ifdef _WIN32
+    const fs::path dir = ExePath().parent_path();
+    return fs::is_regular_file(dir / "recomp" / "tools" / "msr" / "recomp" / "build_module.py", e) && Writable(dir);
+#else
+    const char* image = std::getenv("APPIMAGE");
+    return image && *image && fs::is_regular_file(FromUtf8(image), e) && Writable(FromUtf8(image).parent_path());
+#endif
+}
+
+// the release list (a worker thread, when the launcher starts): the newest release above this version, if any
+void CheckForUpdate() {
+    std::string url = "https://api.github.com/repos/" MSR_UPDATE_REPO "/releases?per_page=20";
+    if (const char* u = std::getenv("MSR_UPDATE_URL"); u && *u) url = u;
+    if (url == "off") return;
+    const std::string curl = SystemTool("curl");
+    if (curl.empty()) return;
+    std::error_code e;
+    fs::create_directories(UpdateFolder(), e);
+    const fs::path list = UpdateFolder() / "releases.json";
+    fs::remove(list, e);
+    if (!UpdateTool({curl, "-sSfL", "--max-time", "20", "--connect-timeout", "10", "-H", "Accept: application/vnd.github+json",
+                     "-o", Utf8(list), url})) {
+        UpdateLog("no release list from " + url);
+        return;
+    }
+    const std::string text = ReadText(list);
+    JsonReader reader{text};
+    const Json releases = reader.Value();
+    if (!reader.ok || releases.type != Json::Array) { UpdateLog("the release list could not be read"); return; }
+    const std::vector<int> current = VersionOf(MSR_NATIVE_VERSION);
+    std::vector<int> best_version = current;
+    const Json *best = nullptr, *best_asset = nullptr;
+    for (const Json& r : releases.items) {
+        if (r.type != Json::Object || r.Flag("draft")) continue;
+        const std::vector<int> v = VersionOf(r.Str("tag_name"));
+        if (v.empty() || !Newer(v, best_version)) continue;
+        const Json* assets = r.Get("assets");
+        if (!assets) continue;
+        for (const Json& a : assets->items) {
+            const std::string name = a.Str("name"), suffix = PackageSuffix();
+            if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0 &&
+                !a.Str("browser_download_url").empty()) {
+                best = &r;
+                best_asset = &a;
+                best_version = v;
+                break;
+            }
+        }
+    }
+    if (!best) { UpdateLog("msr-native " MSR_NATIVE_VERSION " is the newest"); return; }
+    std::string version = best->Str("tag_name");
+    if (!version.empty() && (version[0] == 'v' || version[0] == 'V')) version.erase(0, 1);
+    std::string sha256 = best_asset->Str("digest");
+    if (sha256.rfind("sha256:", 0) == 0) sha256.erase(0, 7);
+    else sha256.clear();
+    const bool installable = Installable();
+    UpdateLog("offered: msr-native " + version + " (" + best_asset->Str("name") + ")" + (installable ? "" : ", not here: the page"));
+    std::scoped_lock lock{S.lock};
+    S.update = Snapshot::Update::Available;
+    S.update_version = version;
+    S.update_page = best->Str("html_url");
+    S.update_url = best_asset->Str("browser_download_url");
+    S.update_sha256 = sha256;
+    S.update_size = static_cast<std::uint64_t>(best_asset->Num("size"));
+    S.update_installable = installable;
+    S.update_note = installable ? "A " + Megabytes(S.update_size) + " download. Your saves, settings, mods and the native code stay."
+                                : std::string("Download it from its page.");
+    S.dirty = true;
+}
+
+// the leftovers of an update: the old files (once the old program has ended) and the unpacked package
+void CleanUpdate() {
+    std::error_code e;
+    fs::remove_all(UpdateFolder() / "unpacked", e);
+    for (const auto& entry : fs::directory_iterator(UpdateFolder(), e))
+        if (entry.path().extension() == ".zip") fs::remove(entry.path(), e);
+#ifdef _WIN32
+    const fs::path install = ExePath().parent_path();
+    for (int attempt = 0; attempt < 40; attempt++) {   // 20 s: the old program may still be ending
+        std::vector<fs::path> old;
+        for (const auto& entry : fs::directory_iterator(install, e))
+            if (Utf8(entry.path().filename()).find(".updating-old") != std::string::npos) old.push_back(entry.path());
+        if (fs::is_directory(install / "recomp", e))
+            for (const auto& entry : fs::recursive_directory_iterator(install / "recomp", e))
+                if (Utf8(entry.path().filename()).find(".updating-old") != std::string::npos) old.push_back(entry.path());
+        bool left = false;
+        for (const auto& p : old) {
+            fs::remove(p, e);
+            left |= static_cast<bool>(e);
+        }
+        if (!left) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(500));
+    }
+#endif
+}
+
+#ifdef _WIN32
+// <path>.updating-old, or <path>.updating-old2... when an earlier one cannot be removed yet
+fs::path OldName(const fs::path& p) {
+    std::error_code e;
+    for (int n = 1;; n++) {
+        fs::path old = p;
+        old += n == 1 ? std::string(".updating-old") : ".updating-old" + std::to_string(n);
+        fs::remove(old, e);
+        if (!fs::exists(old, e)) return old;
+    }
+}
+
+// the unpacked package's files in place of this installation's (see above); "" when done
+std::string InstallWindows(const fs::path& zip) {
+    std::error_code e;
+    const fs::path install = ExePath().parent_path(), unpacked = UpdateFolder() / "unpacked";
+    fs::remove_all(unpacked, e);
+    fs::create_directories(unpacked, e);
+    const std::string tar = SystemTool("tar");
+    if (tar.empty()) return "Unpacking needs tar, which this system does not have.";
+    UpdateStatus(Snapshot::Update::Working, "Unpacking");
+    if (!UpdateTool({tar, "-xf", Utf8(zip), "-C", Utf8(unpacked)})) return "The download could not be unpacked.";
+    fs::path root;   // the package's folder: the one with msr-native.exe
+    if (fs::is_regular_file(unpacked / "msr-native.exe", e)) root = unpacked;
+    else
+        for (const auto& entry : fs::directory_iterator(unpacked, e))
+            if (fs::is_regular_file(entry.path() / "msr-native.exe", e)) root = entry.path();
+    if (root.empty() || !fs::is_regular_file(root / "recomp" / "tools" / "msr" / "recomp" / "build_module.py", e))
+        return "The download is not an msr-native package.";
+    std::vector<fs::path> files;   // relative to the package
+    for (const auto& entry : fs::recursive_directory_iterator(root, e))
+        if (entry.is_regular_file(e)) files.push_back(fs::relative(entry.path(), root, e));
+    UpdateStatus(Snapshot::Update::Working, "Putting the new files in place");
+    struct Placed { fs::path dest, old; };
+    std::vector<Placed> placed;
+    const auto undo = [&] {
+        std::error_code u;
+        for (auto it = placed.rbegin(); it != placed.rend(); ++it) {
+            fs::remove(it->dest, u);
+            if (!it->old.empty()) fs::rename(it->old, it->dest, u);
+        }
+    };
+    for (const auto& rel : files) {
+        const fs::path dest = install / rel;
+        fs::path old;
+        if (fs::exists(dest, e)) {
+            old = OldName(dest);
+            fs::rename(dest, old, e);
+            if (e) { undo(); return "Could not replace " + Utf8(rel) + " (" + e.message() + ")."; }
+        }
+        fs::create_directories(dest.parent_path(), e);
+        fs::copy_file(root / rel, dest, e);
+        placed.push_back({dest, old});
+        if (e) { undo(); return "Could not write " + Utf8(rel) + " (" + e.message() + ")."; }
+    }
+    // the recompiler's files the new package no longer has: retired with the old ones (deleted by the new program)
+    std::set<fs::path> fresh;
+    for (const auto& rel : files) fresh.insert(install / rel);
+    std::vector<fs::path> stale;
+    for (const auto& entry : fs::recursive_directory_iterator(install / "recomp", e))
+        if (entry.is_regular_file(e) && !fresh.count(entry.path()) &&
+            Utf8(entry.path().filename()).find(".updating-old") == std::string::npos)
+            stale.push_back(entry.path());
+    for (const auto& p : stale) fs::rename(p, OldName(p), e);
+    UpdateLog("installed " + std::to_string(files.size()) + " files into " + Utf8(install));
+    S.restart_into = install / "msr-native.exe";
+    return {};
+}
+#else
+// the new AppImage over the running one (see above); "" when done
+std::string InstallLinux(const fs::path& download) {
+    std::error_code e;
+    const fs::path image = FromUtf8(std::getenv("APPIMAGE"));
+    if (chmod(download.c_str(), 0755)) return "The new AppImage could not be made executable.";
+    fs::rename(download, image, e);
+    if (e) return "Could not replace the AppImage (" + e.message() + ").";
+    UpdateLog("installed " + Utf8(image));
+    S.restart_into = image;
+    return {};
+}
+#endif
+
+// Update (a worker thread): download, check, put in place; the launcher then closes and the new version starts
+void StartUpdate() {
+    std::string url, sha256;
+    std::uint64_t size;
+    {
+        std::scoped_lock lock{S.lock};
+        if (!S.update_installable || S.update == Snapshot::Update::Working || S.update == Snapshot::Update::None ||
+            S.building || S.playing)
+            return;
+        S.update = Snapshot::Update::Working;
+        S.update_note = "Starting the download";
+        S.update_progress = 0.f;
+        S.dirty = true;
+        url = S.update_url;
+        sha256 = S.update_sha256;
+        size = S.update_size;
+    }
+    if (S.update_worker.joinable()) S.update_worker.join();
+    S.update_worker = std::thread([url, sha256, size] {
+        const std::string error = [&]() -> std::string {
+            const std::string curl = SystemTool("curl");
+            if (curl.empty()) return "Downloading needs curl, which this system does not have.";
+            std::error_code e;
+            fs::create_directories(UpdateFolder(), e);
+#ifdef _WIN32
+            const fs::path file = UpdateFolder() / "msr-native-update.zip";
+#else
+            fs::path file = FromUtf8(std::getenv("APPIMAGE"));
+            file += ".download";
+#endif
+            fs::remove(file, e);
+            if (!UpdateTool({curl, "-sSfL", "--retry", "2", "--connect-timeout", "30", "-o", Utf8(file), url}, file, size)) {
+                fs::remove(file, e);
+                return "The download failed. Check the internet connection.";
+            }
+            if (!sha256.empty()) {
+                UpdateStatus(Snapshot::Update::Working, "Checking the download");
+                const std::string actual = Sha256(file);
+                if (actual != sha256) {
+                    fs::remove(file, e);
+                    UpdateLog("SHA-256 " + actual + ", expected " + sha256);
+                    return "The download is not the release's file (its SHA-256 differs).";
+                }
+            }
+#ifdef _WIN32
+            return InstallWindows(file);
+#else
+            return InstallLinux(file);
+#endif
+        }();
+        if (!error.empty()) {
+            UpdateLog("failed: " + error);
+            UpdateStatus(Snapshot::Update::Failed, error);
+            return;
+        }
+        UpdateStatus(Snapshot::Update::Working, "Starting the new version");
+        std::scoped_lock lock{S.lock};
+        S.quit = true;   // msr_launcher_main closes the window and starts it
+    });
+}
+
+void OpenPage(const std::string& url) {
+    if (url.rfind("https://", 0) != 0) return;
+#ifdef _WIN32
+    ShellExecuteW(nullptr, L"open", Wide(url).c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#else
+    Child c;
+    if (Spawn({"xdg-open", url}, {}, false, {}, true, c)) std::thread([c]() mutable { Poll(c, true); Close(c); }).detach();
+#endif
+}
+
 // ---- Play: this program again, with the display settings ----
 bool StartGame() {
     MsrIni::File file(Utf8(S.settings));
@@ -817,8 +1280,14 @@ void Publish() {
         s.code = S.code;
         s.code_note = S.code_note;
         s.progress = S.progress;
-        s.can_play = !S.game.empty() && S.game_note.empty() && S.code == Code::Ready && !S.building;
+        s.can_play = !S.game.empty() && S.game_note.empty() && S.code == Code::Ready && !S.building &&
+                     S.update != Snapshot::Update::Working;
         s.folder = Utf8(S.user);
+        s.update = S.update;
+        s.update_version = S.update_version;
+        s.update_note = S.update_note;
+        s.update_progress = S.update_progress;
+        s.update_installable = S.update_installable;
     }
     static const bool browse = CanBrowse();
     s.can_browse = browse;
@@ -836,7 +1305,8 @@ extern "C" void msr_launcher_action(int kind, const char* text) {
         bool ready;
         {
             std::scoped_lock lock{S.lock};
-            ready = !S.game.empty() && S.game_note.empty() && S.code == Code::Ready && !S.building && !S.playing;
+            ready = !S.game.empty() && S.game_note.empty() && S.code == Code::Ready && !S.building && !S.playing &&
+                    S.update != Snapshot::Update::Working;
         }
         if (ready) {
             msr_settings_save();
@@ -858,6 +1328,16 @@ extern "C" void msr_launcher_action(int kind, const char* text) {
     }
     case Kind::LauncherGame: SetGame(text ? text : ""); break;
     case Kind::LauncherFolder: OpenFolder(S.user); break;
+    case Kind::LauncherUpdate: StartUpdate(); break;
+    case Kind::LauncherUpdatePage: {
+        std::string page;
+        {
+            std::scoped_lock lock{S.lock};
+            page = S.update_page;
+        }
+        OpenPage(page);
+        break;
+    }
     case Kind::Quit: {
         std::scoped_lock lock{S.lock};
         S.quit = true;
@@ -915,6 +1395,7 @@ extern "C" int msr_launcher_main(void) {
         return 1;
     }
     Publish();
+    S.update_checker = std::thread([] { CleanUpdate(); CheckForUpdate(); });   // a newer release (the updates section)
     for (;;) {
         bool playing;
         {
@@ -943,7 +1424,25 @@ extern "C" int msr_launcher_main(void) {
     }
     CancelBuild();
     if (S.worker.joinable()) S.worker.join();
+    {   // a check or download still running: stopped (an update being put in place finishes first)
+        std::scoped_lock lock{S.lock};
+        Kill(S.update_tool);
+    }
+    if (S.update_checker.joinable()) S.update_checker.join();
+    if (S.update_worker.joinable()) S.update_worker.join();
     msr_settings_save();
     video_shutdown();
+    if (!S.restart_into.empty()) {   // an update: its program, in this one's place
+        std::fprintf(stderr, "launcher: starting %s\n", Utf8(S.restart_into).c_str());
+#ifdef _WIN32
+        Child c;
+        if (Spawn({Utf8(S.restart_into)}, S.restart_into.parent_path(), false, {}, false, c)) Close(c);
+#else
+        unsetenv("LD_LIBRARY_PATH");   // this AppImage's libraries; the new one sets its own
+        const std::string path = Utf8(S.restart_into);
+        execl(path.c_str(), path.c_str(), static_cast<char*>(nullptr));
+        std::fprintf(stderr, "launcher: could not start the new version\n");
+#endif
+    }
     return 0;
 }

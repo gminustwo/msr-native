@@ -1192,8 +1192,42 @@ void Overlay::DrawMenu(float scale, bool appearing) {
 void Overlay::DrawLauncher(const LauncherSnapshot& l, float label_width,
                            const std::function<void()>& default_focus) {
     using Code = LauncherSnapshot::Code;
+    using Update = LauncherSnapshot::Update;
     const auto& style = ImGui::GetStyle();
-    const ImVec4 good{.53f, .89f, .6f, 1.f}, bad{1.f, .55f, .45f, 1.f};
+    const ImVec4 good{.53f, .89f, .6f, 1.f}, bad{1.f, .55f, .45f, 1.f}, accent{.43f, .8f, .98f, 1.f};
+    // A newer release (msr-native's launcher looks when it starts): put in place here, or its page
+    if (l.update != Update::None) {
+        ImGui::PushTextWrapPos(0.f);
+        ImGui::TextColored(accent, "msr-native %s is available.", l.update_version.c_str());
+        ImGui::PopTextWrapPos();
+        const float half = (ImGui::GetContentRegionAvail().x - style.ItemSpacing.x) / 2.f;
+        if (l.update == Update::Working) {
+            if (l.update_progress >= 0.f) {
+                ImGui::ProgressBar(l.update_progress, {-FLT_MIN, 0.f});
+            }
+        } else if (l.update_installable) {
+            if (ImGui::Button(l.update == Update::Failed ? "Try again" : "Update now", {half, 0.f})) {
+                Act(OverlayAction::Kind::LauncherUpdate);
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("What's new", {half, 0.f})) {
+                Act(OverlayAction::Kind::LauncherUpdatePage);
+            }
+        } else if (ImGui::Button("Open the download page", {-FLT_MIN, 0.f})) {
+            Act(OverlayAction::Kind::LauncherUpdatePage);
+        }
+        if (!l.update_note.empty()) {
+            ImGui::PushTextWrapPos(0.f);
+            if (l.update == Update::Failed) {
+                ImGui::TextColored(bad, "%s", l.update_note.c_str());
+            } else {
+                Note(l.update_note.c_str());
+            }
+            ImGui::PopTextWrapPos();
+        }
+        ImGui::Separator();
+        ImGui::Spacing();
+    }
     // Play: the first and largest button, focused when it can start the game
     ImGui::BeginDisabled(!l.can_play);
     ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonHovered));
