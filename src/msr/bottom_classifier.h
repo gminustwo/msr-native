@@ -397,6 +397,14 @@ inline Result Classify(const Image& image) {
         if (DarkFraction(image, 6) > .3f) {
             return {Bottom::Menu, TitleMenuPage(image)};
         }
+        // The pause menu's pages and boxes stand over its bottom bar, a rule in the last rows
+        // (unlit 132-273); a picture with a cyan edge does not, such as the ship's cockpit the
+        // bottom screen shows after a file's Continue (the windscreen's edge, 123-135 px; 88 at
+        // most there). Hidden, as the emblem (2026-11-03, the user: its panel's outline showed
+        // over the view for a few frames).
+        if (LongestRule(image, 195, Height, 70, 15).length < 110) {
+            return {Bottom::Logo};
+        }
         Page page = Page::Other;
         if (title.length >= 60) {
             if (title.x1 >= 310 && title.x0 < 90) {

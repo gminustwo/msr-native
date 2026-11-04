@@ -550,10 +550,13 @@ extern "C" void msr_compose(const uint8_t* bottom, double now_s, unsigned button
 
     if (st.panel_alpha > 0.f) {
         const bool see_through = P::backdrop_removed.load(std::memory_order_relaxed);
-        Fill(left, top_y, width, height, 0, 0, 0, (see_through ? .2f : .45f) * st.panel_alpha * (1.f - ease));
+        const float card = std::clamp(P::menu_backdrop.load(std::memory_order_relaxed), 0.f, 1.f);
+        // the view darkens behind the menus: the pause menu's by 45%, the title menus' (the file select) by 25-60% as
+        // the Title menu background setting says (2026-11-03, the user: the file select's background "needs to be
+        // darkened"; it was 20%)
+        Fill(left, top_y, width, height, 0, 0, 0, (see_through ? .25f + .35f * card : .45f) * st.panel_alpha * (1.f - ease));
         if (see_through) {
             const float grow = panel.H() * .03f;
-            const float card = std::clamp(P::menu_backdrop.load(std::memory_order_relaxed), 0.f, 1.f);
             Fill(panel.l - grow, panel.t - grow, panel.W() + 2 * grow, panel.H() + 2 * grow, .01f, .035f, .07f,
                  card * st.panel_alpha, 4);
         }

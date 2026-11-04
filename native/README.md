@@ -37,7 +37,9 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   classification waits; the missile counter lights as the game lights it. In Morph Ball the game greys the beam row,
   but the beam can still be changed: the lit slot is then the one with by far the most of its pixels over 120
   (`bottom_classifier.h` ReadBeamSlots; before, the HUD kept its highlight on the old slot, over a dimmed icon, and
-  RT tapped the same slot again).
+  RT tapped the same slot again). A picture on the bottom screen with a cyan edge, such as the ship's cockpit after a
+  file's Continue, is not taken for a menu (it had shown as the panel, its outline over the view for about a second):
+  the pause menu's pages stand over its bottom bar, a rule in the last rows, which the picture lacks.
 - Input: RT taps the next beam slot, LT the minimap (Morph Ball), as injected touches while the HUD shows (C and
   Left Shift too, and the mouse wheel: down the next beam, up the one before); the pad's Back/Select opens the settings
   panel (`select_layout`: `settings`, or true for the next layout, false for 3DS Select). Every pad SDL can map is
@@ -99,7 +101,11 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
 - HDR (`video.c`, `shaders/hdr.frag`, `win/hdr_win.c`): with the player's HDR on and the display in HDR mode (DXGI's
   colour space; its peak and Windows' SDR white from DXGI and the display configuration), an HDR10 (or scRGB)
   swapchain. The game is drawn as before; hdr.frag expands its highlights towards the peak (default at most 1000 nits)
-  and lays the interface (HUD pieces, menus, the settings: their own layer) over it at paper white.
+  and lays the interface (HUD pieces, menus, the settings: their own layer) over it at paper white. Under the
+  interface's cards and dims (from a quarter of coverage) the picture is not expanded, so they darken it as in SDR
+  (2026-11-03: behind the file select the title scene's highlights, expanded first, stayed brighter than the menu).
+  Behind the title menus (the file select) the view darkens by 25-60% as the Title menu background setting says
+  (20% before), the pause menu's by 45%.
 - The amiibo extras (galleries, Fusion Mode, the Fusion suit) and the cheats (energy, missiles, Aeion kept full):
   `cheats.h`'s patches follow the settings each VBlank; `cheats.cpp` refills as the emulator build's
   ApplyMsrRefills, calling the components' setters on the game thread from a trap at the frame limiter.
@@ -253,8 +259,9 @@ every GX command of that game frame, `gxdump_<n>_<cmd>.bin`: decode the tiled su
 `PWR_DRAWDBG=<target>,<shader>,<after s>,<count>` (draw state), `PWR_PEEK=<addr>,<words>` (guest memory).
 `MSR_NATIVE_ENTRIES_OUT=<file>` collects code the module lacks, for `build_module.py --extra`. `PWR_TEX_TRACE=1` lists
 each texture sampled into each target once, with the targets it lies in (how render-to-texture flows);
-`PWR_TEXPACK_TRACE=1` lists each texture a pack replaces. `PWR_SEQ=<presented frame>,<count>` writes both screens of
-those frames as PPM files (seq_*): one-frame glitches such as the file select's flashes show up there.
+`PWR_TEXPACK_TRACE=1` lists each texture a pack replaces. `PWR_SEQ=<presented frame>,<count>[,<every>]` writes both
+screens of those frames (or of every `<every>`th) as PPM files (seq_*): one-frame glitches such as the file select's
+flashes show up there.
 
 ## Adapting Woohoo! Flight School's runtime
 

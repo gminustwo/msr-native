@@ -988,10 +988,14 @@ int video_frame(void) {
     gsp_screens(&top, &bottom); decode_screen(&top, TOP_W, top_px);
     /* the bottom screen: from its scan-out copy's read-back when there is one (pica_vk.c: its guest copy is not made then) */
     if (!(gpu_ok && vk13 && bottom.valid && (bottom.format & 7) == 1 && pica_vk_bottom_pixels(bottom.addr, bot_px))) decode_screen(&bottom, BOT_W, bot_px);
-    {   /* PWR_SEQ=<first presented frame>,<count>: both screens as decoded, one PPM pair per presented frame */
-        static long first = -2, count; static long n;
-        if (first == -2) { const char *e = getenv("PWR_SEQ"); first = -1; if (e) { first = atol(e); const char *c = strchr(e, ','); count = c ? atol(c + 1) : 30; } }
-        if (first >= 0 && n >= first && n < first + count) {
+    {   /* PWR_SEQ=<first presented frame>,<count>[,<every>]: both screens as decoded, one PPM pair per presented frame
+           (or every <every>th of them) */
+        static long first = -2, count, every = 1; static long n;
+        if (first == -2) {
+            const char *e = getenv("PWR_SEQ"); first = -1;
+            if (e) { first = atol(e); const char *c = strchr(e, ','); count = c ? atol(c + 1) : 30; const char *s = c ? strchr(c + 1, ',') : NULL; if (s && atol(s + 1) > 1) every = atol(s + 1); }
+        }
+        if (first >= 0 && n >= first && n < first + count && (n - first) % every == 0) {
             { extern void k_ev(int, uint32_t, uint32_t); k_ev(0x30, (uint32_t)(n - first), bottom.addr); }
             char fn[64]; snprintf(fn, sizeof fn, "seq_%04ld_b_%08x.ppm", n - first, bottom.addr); FILE *f = fopen(fn, "wb");
             if (f) { fprintf(f, "P6 %d %d 255\n", BOT_W, SCR_H); for (int i = 0; i < BOT_W * SCR_H; i++) fwrite(bot_px + 4 * i, 1, 3, f); fclose(f); }

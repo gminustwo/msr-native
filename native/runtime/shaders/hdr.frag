@@ -33,8 +33,13 @@ vec3 pq(vec3 nits) {
 }
 
 void main() {
-    vec3 g = expand(linear(texture(game, uv).rgb)) * p.extra.x;
     vec4 u = texture(ui, uv);
+    // the highlights expand where the interface leaves the picture showing: under its cards and dims (the file select's,
+    // the pause menu's; from a quarter of coverage, smoothly below) the picture stays at its SDR level, so they darken
+    // it as in SDR (2026-11-03, the user: the file select's background was "not contrasted enough"; expanded first, a
+    // 25% see-through card still showed it at ~90% of paper white)
+    vec3 lin = linear(texture(game, uv).rgb);
+    vec3 g = mix(expand(lin), lin, smoothstep(0.0, 0.25, u.a)) * p.extra.x;
     vec3 ul = u.a > 0.0 ? linear(u.rgb / u.a) * p.extra.x : vec3(0.0);
     vec3 nits = g * (1.0 - u.a) + ul * u.a;
     if (p.mode.x == 1) {
