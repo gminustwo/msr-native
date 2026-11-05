@@ -7,11 +7,19 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <mutex>
 
 extern "C" int rt_replace_file(const char* tmp, const char* dst);   // runtime.c
 
 namespace MsrIni {
 namespace {
+
+/// Held while a file is read or replaced: the Mods and Textures tabs' scanner reads settings.ini on its own thread, and
+/// on Windows a file open in one thread cannot be replaced from another (MoveFileEx fails).
+std::mutex& FileLock() {
+    static std::mutex lock;
+    return lock;
+}
 
 std::string Trim(const std::string& s) {
     std::size_t a = 0, b = s.size();
@@ -154,21 +162,24 @@ std::vector<std::string> Unescape(const std::string& raw) {
 }
 
 File::File(std::string path_) : path(std::move(path_)) {
-    if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
-        std::string text;
-        char buf[4096];
-        std::size_t n;
-        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
-        std::fclose(f);
-        std::size_t start = 0;
-        while (start < text.size()) {
-            std::size_t end = text.find('\n', start);
-            if (end == std::string::npos) end = text.size();
-            std::string line = text.substr(start, end - start);
-            if (!line.empty() && line.back() == '\r') line.pop_back();
-            lines.push_back(line);
-            start = end + 1;
+    std::string text;
+    {
+        std::scoped_lock lock{FileLock()};
+        if (std::FILE* f = std::fopen(path.c_str(), "rb")) {
+            char buf[4096];
+            std::size_t n;
+            while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
+            std::fclose(f);
         }
+    }
+    std::size_t start = 0;
+    while (start < text.size()) {
+        std::size_t end = text.find('\n', start);
+        if (end == std::string::npos) end = text.size();
+        std::string line = text.substr(start, end - start);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        lines.push_back(line);
+        start = end + 1;
     }
 }
 
@@ -287,6 +298,7 @@ void File::SetList(const std::string& group, const std::string& key, const std::
 }
 
 bool File::Save() const {
+    std::scoped_lock lock{FileLock()};
     const std::string tmp = path + ".tmp";
     std::FILE* f = std::fopen(tmp.c_str(), "wb");
     if (!f) return false;

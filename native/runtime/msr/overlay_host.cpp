@@ -6,11 +6,14 @@
 #include <SDL.h>
 #include <imgui.h>
 #include <vulkan/vulkan.h>
+#include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstdio>
 #include <mutex>
 #include <string>
+#include <thread>
 #include "ini.h"
 #include "mods.h"
 #include "msr.h"
@@ -111,7 +114,8 @@ void LoadControls() {
     }
 }
 
-void RefreshMods() {
+/// The Mods and Textures tabs' lists, from the folders and settings.ini. Any thread: it only reads.
+MSR::ModsSnapshot ScanMods() {
     MSR::ModsSnapshot s;
     for (const auto& mod : NativeMods::GameMods()) s.mods.push_back({mod.name, NativeMods::Describe(mod), mod.enabled});
     s.mod_folder = NativeMods::GameModFolder();
@@ -121,7 +125,89 @@ void RefreshMods() {
     s.dump = false;
     s.texture_options = false;
     s.restart_needed = !launcher_mode && NativeMods::Pending() != NativeMods::Booted();
-    O().SetMods(s);
+    return s;
+}
+
+std::atomic<unsigned> mods_generation{0};   // raised by each RefreshMods: a background scan begun before it is stale
+
+void RefreshMods() {
+    ++mods_generation;
+    O().SetMods(ScanMods());
+}
+
+/// While the Mods or Textures tab shows, their folders are scanned again about once a second (native/README.md), so a
+/// pack or mod copied in with the menu open appears. The scan walks every file of every pack (thousands for a large
+/// one): a thread of its own. A scan begun before a change in the menu is dropped, so the change never flicks back.
+/// Allocated once and never freed: its thread is joined in msr_overlay_shutdown, and no static destructor touches
+/// its condition variable (the launcher leaves through exit()).
+struct ModsScanner {
+    std::mutex lock;
+    std::condition_variable wake;
+    std::thread thread;
+    bool wanted = false, quit = false, ready = false;
+    unsigned wanted_generation = 0, generation = 0;   // mods_generation when the waiting scan / the result was asked
+    MSR::ModsSnapshot result;
+    double next = 0;   // render thread: when the next scan is due
+
+    void Run() {
+        std::unique_lock guard{lock};
+        for (;;) {
+            wake.wait(guard, [this] { return wanted || quit; });
+            if (quit) return;
+            wanted = false;
+            const unsigned asked = wanted_generation;
+            guard.unlock();
+            MSR::ModsSnapshot found = ScanMods();
+            guard.lock();
+            result = std::move(found);
+            generation = asked;
+            ready = true;
+        }
+    }
+};
+
+ModsScanner& Scanner() {
+    static ModsScanner* scanner = new ModsScanner;
+    return *scanner;
+}
+
+/// Each frame, after the menu's actions: a finished scan shown, and the next one asked for while the tabs show.
+void PollModsScan() {
+    ModsScanner& sc = Scanner();
+    MSR::ModsSnapshot found;
+    bool fresh = false;
+    {
+        std::scoped_lock guard{sc.lock};
+        if (sc.ready) {
+            sc.ready = false;
+            fresh = sc.generation == mods_generation;
+            if (fresh) found = std::move(sc.result);
+        }
+    }
+    if (fresh) O().SetMods(found);
+    if (!O().ModsTabShown()) {
+        sc.next = 0;   // scanned at once when the tab shows again
+        return;
+    }
+    const double now = Now();
+    if (now < sc.next) return;
+    sc.next = now + 1.0;
+    std::scoped_lock guard{sc.lock};
+    if (sc.quit) return;
+    if (!sc.thread.joinable()) sc.thread = std::thread([&sc] { sc.Run(); });
+    sc.wanted = true;
+    sc.wanted_generation = mods_generation;
+    sc.wake.notify_one();
+}
+
+void StopModsScan() {
+    ModsScanner& sc = Scanner();
+    {
+        std::scoped_lock guard{sc.lock};
+        sc.quit = true;
+    }
+    sc.wake.notify_one();
+    if (sc.thread.joinable()) sc.thread.join();
 }
 
 /// What the overlay changed, applied, and kept for the launcher where it differs from what the launcher gave. In the
@@ -296,6 +382,7 @@ extern "C" void msr_overlay_draw(VkCommandBuffer command, uint32_t width, uint32
 }
 
 extern "C" void msr_overlay_shutdown(void) {
+    StopModsScan();
     O().Shutdown();
 }
 
@@ -544,4 +631,5 @@ extern "C" void msr_overlay_frame(void) {
             break;
         }
     }
+    PollModsScan();
 }

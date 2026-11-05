@@ -237,6 +237,9 @@ public:
     void Init(const OverlayHook::VulkanContext& context) override;
     void Draw(VkCommandBuffer command, std::uint32_t width, std::uint32_t height) override;
     void Shutdown() override;
+    /// msr-native: the menu shows the Mods or Textures tab, so their folders are scanned again for what the player
+    /// added or removed meanwhile. Renderer thread.
+    bool ModsTabShown() const;
 
 private:
     struct Event {

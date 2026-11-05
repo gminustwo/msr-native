@@ -162,6 +162,13 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   lists the functions each changed word turns off); code a mod adds runs there too, its threads included. A Randovania
   seed is such a mod (41 changed words, 14 functions interpreted, 60 FPS); its loader's OpenProcess and
   ControlProcessMemory succeed; with one the Fusion suit setting stays off, as in the emulator build.
+- The Mods and Textures tabs follow their folders (2026-11-04, `overlay_host.cpp` ModsScanner): while one of them
+  shows, in the launcher or the game, a thread of its own scans the folders again about once a second, so a pack or
+  mod copied in with the menu open appears with what it holds (a pack's texture count grows while it is copied), and
+  in the game the restart that loads it is offered. The lists used to be read only when the menu started, when the
+  game ended and after a change in the menu: after a first install a pack copied in stayed unlisted, though the game
+  loaded it. A scan that began before a change in the menu is dropped, and `ini.cpp` reads or replaces a file under
+  one lock (on Windows a file open in one thread cannot be replaced from another).
 - Code the module lacks (reached only through pointers computed at run time): `interp_full.c` interprets it (ARMv6K
   ARM and Thumb, VFPv2) until the module's code is reached, where the emulator build uses its JIT. Each such address
   is logged once and added to `user/msr/recomp-jit-entries-core-native.txt`, which the launcher's next build of the

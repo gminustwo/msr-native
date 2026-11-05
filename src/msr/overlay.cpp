@@ -747,6 +747,10 @@ ModsSnapshot Overlay::ModsCopy() {
     return mods;
 }
 
+bool Overlay::ModsTabShown() const {
+    return was_visible && (tab == 4 || tab == 5);   // DrawMenu's Mods and Textures
+}
+
 void Overlay::ChangeMods(OverlayAction::Kind kind, int value,
                          const std::function<void(ModsSnapshot&)>& edit) {
     std::scoped_lock lock{mutex};
