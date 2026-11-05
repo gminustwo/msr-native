@@ -4,6 +4,7 @@
  *
  * Started on its own (no options, or --launcher) it is the launcher (msr/launcher.cpp): the settings menu with the
  * game file, the native code's build and Play, which starts this program again with --play and the options below.
+ * --direct (msr-native-direct.exe's): Play without the launcher, which opens only when the game cannot start yet.
  *
  * usage: msr-native [--play] [--dump <dump.3ds|.cci|.cxi>] [--module <library>] [options]
  *   --dump        the decrypted dump (also $MSR_DUMP, or the first line of user/msr/game-path.txt)
@@ -266,6 +267,7 @@ static void log_buffered(void) {
 }
 
 int msr_launcher_main(void);
+int msr_launcher_direct(void);
 
 int main(int argc, char **argv) {
 #ifdef _WIN32
@@ -276,6 +278,7 @@ int main(int argc, char **argv) {
 #endif
     log_buffered();
     if (argc == 1 || (argc == 2 && !strcmp(argv[1], "--launcher"))) return msr_launcher_main();
+    if (argc == 2 && !strcmp(argv[1], "--direct")) return msr_launcher_direct();
     int scale = 2, fps = 0, volume = 100, packs_given = 0;
     const char *dump = getenv("MSR_DUMP"), *module = NULL, *settings = NULL;
     static char game_path[4096], module_path[4096], save_path[4096];

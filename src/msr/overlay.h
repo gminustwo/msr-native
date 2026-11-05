@@ -27,7 +27,7 @@ namespace MSR {
 /// Options of the single-screen presentation, saved in user/msr/settings.ini.
 struct PlayerSettings {
     bool widescreen = true;
-    bool ultrawide = true;   ///< With widescreen: the view fills a window wider than 16:9, up to 32:9
+    bool ultrawide = true;   ///< With widescreen: the view fills a window wider than 16:9, up to 32:9 (never on without it)
     float camera_zoom = 1.f; ///< The view in play: below 1 wider, above 1 closer
     float hud_scale = .6f;
     float hud_opacity = 1.f;
@@ -155,6 +155,9 @@ struct LauncherSnapshot {
     std::string update_note;         ///< Its size, the download's progress, or what failed
     float update_progress = -1.f;    ///< The download's progress, 0..1, or -1
     bool update_installable = false; ///< The launcher can put it in place (else: its download page)
+    /// The program beside the launcher that starts the game without it (msr-native-direct.exe), once
+    /// the native code is built; empty when there is none
+    std::string direct;
 };
 
 struct OverlayAction {

@@ -9,7 +9,9 @@
 //   - Play: this program again, with --play and the display settings (settings.ini [native]), in the same folder; the
 //     launcher hides until it ends and starts it again when its menu's Restart asks (exit code 75);
 //   - updates: a newer release on GitHub, offered when the launcher starts and put in place of this installation's own
-//     files (the updates section below).
+//     files (the updates section below);
+//   - the direct start: once the native code is built, msr-native-direct.exe beside the program (msr-native-direct.sh
+//     beside the AppImage) starts the game without the launcher (the direct start section below).
 // The user folder: beside the program (Windows, a portable folder; Linux when a user/ folder is there, also beside the
 // AppImage), else the system's (%LOCALAPPDATA%\msr-native, ~/.local/share/msr-native); MSR_NATIVE_HOME overrides it.
 #include <algorithm>
@@ -477,7 +479,10 @@ struct State {
     std::thread update_checker, update_worker;
     Child update_tool;       // the update's current process (curl, tar): stopped when the launcher closes
     fs::path restart_into;   // after the window closes: this program's new version (an update)
+    std::string direct;      // the direct start's program, written beside this one (its file name), or empty
 } S;
+
+void WriteDirect();   // the direct start section
 
 fs::path KitFolder() { return S.user / "msr" / "recomp-kit"; }
 fs::path LibraryPath() { return S.user / "msr" / "recomp" / Library; }
@@ -544,6 +549,7 @@ void CheckCode() {
         code = runtime == MSR_AOT_RUNTIME_SHA256 ? Code::Ready : Code::Outdated;
         if (!built.empty()) note = "Built " + built + (code == Code::Ready ? "." : " for another version of msr-native.");
     }
+    if (code == Code::Ready) WriteDirect();   // the game can start: the program that starts it without the launcher
     std::scoped_lock lock{S.lock};
     if (S.building) return;
     if (S.code != Code::Failed || code == Code::Ready) {
@@ -1288,6 +1294,81 @@ void OpenPage(const std::string& url) {
 #endif
 }
 
+// ---- the direct start: the game without the launcher ----
+// Once the native code is built (CheckCode finds it ready), the launcher writes a program beside itself that starts the
+// game directly: msr-native-direct.exe on Windows (runtime/win/direct.c, inside this program as resource 200), or
+// msr-native-direct.sh beside the AppImage on Linux. Either runs this program with --direct (msr_launcher_direct): Play
+// without the launcher's window, Restart included; while the game cannot start (no game file, the native code missing
+// or built by another version), the launcher opens instead. A shortcut, Steam or a frontend can start it. Written
+// again when this version's differs (after an update; the old one, perhaps running, renamed aside as an update's old
+// files are), and left out when the program's folder cannot be written to.
+fs::path DirectPath() {
+#ifdef _WIN32
+    return ExePath().parent_path() / "msr-native-direct.exe";
+#else
+    const char* image = std::getenv("APPIMAGE");
+    return (image && *image ? FromUtf8(image) : ExePath()).parent_path() / "msr-native-direct.sh";
+#endif
+}
+
+std::string DirectContent() {
+#ifdef _WIN32
+    HRSRC found = FindResourceW(nullptr, MAKEINTRESOURCEW(200), MAKEINTRESOURCEW(10));   // RT_RCDATA
+    HGLOBAL loaded = found ? LoadResource(nullptr, found) : nullptr;
+    const void* bytes = loaded ? LockResource(loaded) : nullptr;
+    return bytes ? std::string(static_cast<const char*>(bytes), SizeofResource(nullptr, found)) : std::string{};
+#else
+    // the AppImage (or the program) by its name, from the script's own folder: the folder can move
+    const char* image = std::getenv("APPIMAGE");
+    std::string quoted = "'";
+    for (char c : Utf8((image && *image ? FromUtf8(image) : ExePath()).filename())) quoted += c == '\'' ? std::string("'\\''") : std::string(1, c);
+    quoted += "'";
+    return "#!/bin/sh\n"
+           "# msr-native without its launcher (the launcher wrote this once the native code was built)\n"
+           "exec \"$(dirname \"$(readlink -f \"$0\")\")\"/" + quoted + " --direct\n";
+#endif
+}
+
+void WriteDirect() {
+    static std::mutex writing;   // the build's worker and the window's thread
+    std::scoped_lock one{writing};
+    const std::string content = DirectContent();
+    if (content.empty()) return;
+    const fs::path path = DirectPath();
+    std::error_code e;
+    if (ReadText(path) != content) {   // missing, or another version's
+        fs::path temp = path;
+        temp += ".new";
+        if (!WriteText(temp, content)) {
+            fs::remove(temp, e);
+            std::fprintf(stderr, "launcher: could not write %s\n", Utf8(path).c_str());
+            return;
+        }
+        fs::path old;
+#ifdef _WIN32
+        if (fs::exists(path, e)) {   // it may be running: renamed aside (CleanUpdate deletes it)
+            old = OldName(path);
+            fs::rename(path, old, e);
+            if (e) old.clear();
+        }
+#else
+        chmod(temp.c_str(), 0755);
+#endif
+        fs::rename(temp, path, e);
+        if (e) {
+            std::error_code ignored;
+            fs::remove(temp, ignored);
+            if (!old.empty()) fs::rename(old, path, ignored);
+            std::fprintf(stderr, "launcher: could not write %s (%s)\n", Utf8(path).c_str(), e.message().c_str());
+            return;
+        }
+        std::fprintf(stderr, "launcher: wrote %s\n", Utf8(path).c_str());
+    }
+    std::scoped_lock lock{S.lock};
+    S.direct = Utf8(path.filename());
+    S.dirty = true;
+}
+
 // ---- Play: this program again, with the display settings ----
 bool StartGame() {
     MsrIni::File file(Utf8(S.settings));
@@ -1335,6 +1416,7 @@ void Publish() {
         s.update_note = S.update_note;
         s.update_progress = S.update_progress;
         s.update_installable = S.update_installable;
+        s.direct = S.direct;
     }
     static const bool browse = CanBrowse();
     s.can_browse = browse;
@@ -1394,8 +1476,10 @@ extern "C" void msr_launcher_action(int kind, const char* text) {
     }
 }
 
-// main.c, when the program is started on its own: the launcher until it is closed. 0 when closed normally.
-extern "C" int msr_launcher_main(void) {
+namespace {
+
+// The user folder, the working folder (the game's paths are user/...) and the log: the launcher's and the direct start's
+void Setup() {
     S.root = DataRoot();
     std::error_code e;
     fs::create_directories(S.root / "user" / "msr", e);
@@ -1419,6 +1503,16 @@ extern "C" int msr_launcher_main(void) {
     setenv("PYTHONUNBUFFERED", "1", 1); setenv("PYTHONUTF8", "1", 1); setenv("PYTHONDONTWRITEBYTECODE", "1", 1);
     unsetenv("PYTHONHOME"); unsetenv("PYTHONPATH");
 #endif
+}
+
+void ReadGame() {
+    std::scoped_lock lock{S.lock};
+    S.game = Trim(ReadText(S.user / "msr" / "game-path.txt"));
+    S.game_note = CheckGame(S.game);
+}
+
+// The launcher's window until it is closed. 0 when closed normally.
+int Launcher() {
     const std::string settings = Utf8(S.settings);
     msr_settings_load(settings.c_str());
     {
@@ -1430,11 +1524,7 @@ extern "C" int msr_launcher_main(void) {
     msr_overlay_launcher(1);
     msr_overlay_start(0, static_cast<int>(file.Number("native", "resolution", 4)), file.Bool("native", "vsync", true),
                       static_cast<int>(file.Number("native", "volume", 100)));
-    {
-        std::scoped_lock lock{S.lock};
-        S.game = Trim(ReadText(S.user / "msr" / "game-path.txt"));
-        S.game_note = CheckGame(S.game);
-    }
+    ReadGame();
     CheckCode();
     video_option("layout", "single");
     if (video_init(3)) {
@@ -1492,4 +1582,41 @@ extern "C" int msr_launcher_main(void) {
 #endif
     }
     return 0;
+}
+
+} // namespace
+
+// main.c, when the program is started on its own: the launcher until it is closed. 0 when closed normally.
+extern "C" int msr_launcher_main(void) {
+    Setup();
+    return Launcher();
+}
+
+// main.c, --direct (msr-native-direct.exe, the direct start section): Play at once, without the launcher's window, and
+// again when the game's Restart asks; the game's exit code. The launcher when the game cannot start yet.
+extern "C" int msr_launcher_direct(void) {
+    Setup();
+    std::fprintf(stderr, "launcher: the direct start (--direct)\n");
+    ReadGame();
+    CheckCode();
+    bool ready;
+    {
+        std::scoped_lock lock{S.lock};
+        ready = !S.game.empty() && S.game_note.empty() && S.code == Code::Ready;
+    }
+    if (!ready) {
+        std::fprintf(stderr, "launcher: the game cannot start yet (the game file or the native code): the launcher\n");
+        return Launcher();
+    }
+    for (;;) {
+        if (!StartGame()) return 1;
+        const int code = Poll(S.game_process, true);
+        std::fprintf(stderr, "launcher: the game ended (%d)\n", code);
+        {
+            std::scoped_lock lock{S.lock};
+            Close(S.game_process);
+            S.playing = false;
+        }
+        if (code != MSR_EXIT_RESTART) return code;
+    }
 }

@@ -42,7 +42,9 @@ tests). Tested on Windows with an RTX 5090 at 1x-10x internal resolution (4K = 9
   the pause menu's pages stand over its bottom bar, a rule in the last rows, which the picture lacks.
 - Ultrawide (2026-11-03; the Display tab's Ultrawide, on by default, `settings.ini` `ultrawide`): in play the view
   takes the window's aspect when it is wider than 16:9, up to 32:9, everything still on the one screen
-  (`compositor.cpp` ViewAspectWanted; wider still, bars at the sides). The world's squeeze becomes 5:3 over the view's
+  (`compositor.cpp` ViewAspectWanted; wider still, bars at the sides). It widens Widescreen (16:9), so it is never on
+  without it (2026-11-04): turning it on turns Widescreen on, Widescreen off turns it off, and a settings file with
+  Ultrawide but not Widescreen reads as neither (`settings.cpp`). The world's squeeze becomes 5:3 over the view's
   aspect (`P::view_aspect`, `presentation.h` ViewScale: 15/16 at 16:9, 15/32 at 32:9), and the camera's field of view
   widens to match (`camera_fov.cpp`: a gain of about 2.1 at 32:9, 3.05 with the smallest zoom), so the game shows and
   culls for the whole width. The HUD keeps to the view's corners, or to its middle 16:9's (the HUD tab's "HUD within

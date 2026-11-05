@@ -24,6 +24,11 @@ First start
 The same menu opens in the game with F1 or the controller's Select / View / Back button.
 The launcher comes back when the game closes.
 
+Once the native code is built, the launcher also makes msr-native-direct.exe beside
+msr-native.exe (Linux: msr-native-direct.sh beside the AppImage). It starts the game straight
+away, without the launcher: use it for a desktop shortcut, Steam or a frontend. When the game
+cannot start yet (no game file, or the native code needs building), it opens the launcher.
+
 Updates
 -------
 When a new version is out, the launcher's Game tab says so when it starts. "Update now"
@@ -52,8 +57,9 @@ Keyboard and mouse (change them in the menu's Controls tab):
   Touch navigation T    Settings F1            Quick save F5, quick load F8
   Fullscreen F11
 The picture fills ultrawide screens (up to 32:9) in play; the menu's Display tab has the
-option. Controllers are read by button position. The button icons in the game follow the device you
-used last (Xbox, PlayStation, Nintendo or the keyboard's keys).
+option (Ultrawide needs Widescreen, and turns it on). Controllers are read by button
+position. The button icons in the game follow the device you used last (Xbox, PlayStation,
+Nintendo or the keyboard's keys).
 
 Licences
 --------

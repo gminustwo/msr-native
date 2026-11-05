@@ -21,6 +21,7 @@ void PlayerSettings::Load(const std::string& path) {
     };
     flag("widescreen", widescreen);
     flag("ultrawide", ultrawide);
+    ultrawide = ultrawide && widescreen;   // it widens the 16:9 view: never on without it (the Display tab keeps to that)
     number("camera_zoom", camera_zoom);
     camera_zoom = std::clamp(camera_zoom, CameraZoomMin, CameraZoomMax);
     number("hud_scale", hud_scale);

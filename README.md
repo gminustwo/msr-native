@@ -22,6 +22,12 @@ game file and the native code on its Game tab (`native/runtime/msr/launcher.cpp`
   `user/msr/recomp-kit/`. Progress shows in the menu; the log is `user/msr/recomp-build.log`.
 - **Play**: the program again with `--play` and the display settings (`settings.ini [native]`). The launcher hides
   until the game ends and starts it again when the game's Restart asks.
+- **The direct start**: once the native code is built, the launcher writes `msr-native-direct.exe` beside the program
+  (Linux: `msr-native-direct.sh` beside the AppImage). It starts the game without the launcher, for a shortcut, Steam
+  or a frontend: `msr-native --direct`, Play and Restart without the launcher's window, or the launcher itself while
+  the game cannot start (no game file, the native code missing or built by another version). The Windows one is
+  `native/runtime/win/direct.c`, a small program that msr-native.exe carries inside it (resource 200) and writes again
+  when its own differs, after an update.
 
 The user folder is `user/` beside the program (Windows; Linux when one is there, also beside the AppImage), else
 `%LOCALAPPDATA%\msr-native` or `~/.local/share/msr-native`. `MSR_NATIVE_HOME` overrides it. The launcher logs to

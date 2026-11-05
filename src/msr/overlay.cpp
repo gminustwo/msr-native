@@ -157,7 +157,7 @@ float NoteHeight(const char* text) {
 void PlayerSettings::Load(const QString& path) {
     QSettings file(path, QSettings::IniFormat);
     widescreen = file.value(QStringLiteral("widescreen"), widescreen).toBool();
-    ultrawide = file.value(QStringLiteral("ultrawide"), ultrawide).toBool();
+    ultrawide = file.value(QStringLiteral("ultrawide"), ultrawide).toBool() && widescreen;   // never on without 16:9
     camera_zoom = std::clamp(file.value(QStringLiteral("camera_zoom"), camera_zoom).toFloat(),
                              CameraZoomMin, CameraZoomMax);
     hud_scale = file.value(QStringLiteral("hud_scale"), hud_scale).toFloat();
@@ -1056,14 +1056,20 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             if (!e.deck_preset) {
                 default_focus();
             }
+            // Ultrawide widens the 16:9 view: on, it turns Widescreen on; Widescreen off turns it off
             row("Widescreen (16:9)");
-            player_changed |= ImGui::Checkbox("##widescreen", &p.widescreen);
+            if (ImGui::Checkbox("##widescreen", &p.widescreen)) {
+                player_changed = true;
+                p.ultrawide = p.ultrawide && p.widescreen;
+            }
             if (e.ultrawide_option) {
                 row("Ultrawide (up to 32:9)");
-                ImGui::BeginDisabled(!p.widescreen);
-                player_changed |= ImGui::Checkbox("##ultrawide", &p.ultrawide);
-                ImGui::EndDisabled();
-                Note("In play, a window wider than 16:9 shows more of the level.");
+                if (ImGui::Checkbox("##ultrawide", &p.ultrawide)) {
+                    player_changed = true;
+                    p.widescreen = p.widescreen || p.ultrawide;
+                }
+                Note("In play, a window wider than 16:9 shows more of the level. It needs Widescreen "
+                     "(16:9), which it turns on.");
             }
             row("Camera zoom");
             player_changed |= ImGui::SliderFloat("##zoom", &p.camera_zoom, CameraZoomMin,
@@ -1336,6 +1342,11 @@ void Overlay::DrawLauncher(const LauncherSnapshot& l, float label_width,
     if (!l.code_note.empty()) {
         ImGui::PushTextWrapPos(0.f);
         Note(l.code_note.c_str());
+        ImGui::PopTextWrapPos();
+    }
+    if (l.code == Code::Ready && !l.direct.empty()) {
+        ImGui::PushTextWrapPos(0.f);
+        Note(("To play without this menu, start " + l.direct + " in the program's folder.").c_str());
         ImGui::PopTextWrapPos();
     }
     ImGui::EndGroup();

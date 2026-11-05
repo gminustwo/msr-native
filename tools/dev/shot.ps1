@@ -18,10 +18,13 @@
 # -Folder: another test folder (e.g. test-build\, an empty user folder for the launcher's first build)
 # -Exe: another msr-native.exe, e.g. an unpacked release; it runs as a player's would: its own DLLs only (no MSYS2 in
 #   PATH) and its own portable user folder beside it (no MSR_NATIVE_HOME); -Folder defaults to its folder
+# -Direct: msr-native-direct.exe beside the program instead, without arguments (the launcher writes it once the native
+#   code is built: the game without the launcher). The game is its grandchild (it runs msr-native.exe --direct).
 param([int]$Seconds = 15, [string]$Shot = 'n', [string]$GameArgs = '--mute', [string]$Keys = '', [int]$After = 0, [string]$Folder = '',
-      [string]$Exe = '')
+      [string]$Exe = '', [switch]$Direct)
 $root = Split-Path (Split-Path $PSScriptRoot)
 $program = if ($Exe) { $Exe } else { Join-Path $root 'build\msr-native.exe' }   # not $exe: PowerShell names ignore case, that is -Exe
+if ($Direct) { $program = Join-Path (Split-Path $program) 'msr-native-direct.exe'; $GameArgs = '' }
 $run = if ($Folder) { $Folder } elseif ($Exe) { Split-Path $Exe } else { Join-Path $root 'test' }
 $out = Join-Path $run 'shots'
 New-Item -ItemType Directory -Force $out | Out-Null
@@ -62,8 +65,13 @@ if ($Exe) { Remove-Item Env:MSR_NATIVE_HOME -ErrorAction SilentlyContinue } else
 $start = @{ FilePath = $program; WorkingDirectory = $run; PassThru = $true; NoNewWindow = $true; RedirectStandardError = (Join-Path $run 'shot.log') }
 if ($GameArgs -ne '') { $start.ArgumentList = $GameArgs }
 $p = Start-Process @start
-function Kids { @(Get-CimInstance Win32_Process -Filter "ParentProcessId=$($p.Id)" -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessId }) }
-# the window to capture and send input to: the program's, else its child's (the game the launcher started)
+# its children, theirs and so on, parents first (-Direct: msr-native.exe --direct, then the game it started)
+function Kids { $all = @(); $level = @($p.Id)
+  for ($depth = 0; $depth -lt 4 -and $level.Count; $depth++) {
+    $next = @(foreach ($id in $level) { Get-CimInstance Win32_Process -Filter "ParentProcessId=$id" -ErrorAction SilentlyContinue | ForEach-Object { $_.ProcessId } })
+    $all += $next; $level = $next }
+  $all }
+# the window to capture and send input to: the program's, else its descendants' (the game the launcher started)
 function Target { $w = [ShotWin]::Largest([uint32]$p.Id); if ($w -eq [IntPtr]::Zero) { foreach ($k in Kids) { $w = [ShotWin]::Largest([uint32]$k); if ($w -ne [IntPtr]::Zero) { [ShotWin]::SetWindowPos($w, [IntPtr]1, 0, 0, 0, 0, 0x13) | Out-Null; break } } }; $w }
 # behind every other window as soon as it exists (HWND_BOTTOM, no move/size/activation); captures use PrintWindow
 for ($i = 0; $i -lt 100; $i++) { $bh = [ShotWin]::Largest([uint32]$p.Id); if ($bh -ne [IntPtr]::Zero) { [ShotWin]::SetWindowPos($bh, [IntPtr]1, 0, 0, 0, 0, 0x13) | Out-Null; break }; Start-Sleep -Milliseconds 50 }
@@ -113,6 +121,6 @@ if ($Keys -ne '' -and -not $p.HasExited) {
   Start-Sleep -Seconds $After
   Grab "${Shot}_end"
 }
-$kids = Kids   # the launcher first (it would bring its window back when the game ends), then the game, by its id
+$kids = Kids   # the launcher first (it would bring its window back or restart the game when it ends), then the game, by its id
 if (-not $p.HasExited) { $p | Stop-Process }
 foreach ($k in $kids) { Stop-Process -Id $k -ErrorAction SilentlyContinue }
