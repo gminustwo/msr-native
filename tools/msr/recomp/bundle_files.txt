@@ -17,3 +17,6 @@ src/core/arm/dynarmic/arm_tick_counts.h
 src/core/arm/msr_aot/aot_generated.h
 src/core/arm/msr_aot/aot_module.cpp
 src/core/arm/msr_aot/aot_runtime.h
+src/core/arm/msr_aot/a64/emmintrin.h
+src/core/arm/msr_aot/a64/msr_sse_a64.h
+src/core/arm/msr_aot/a64/xmmintrin.h

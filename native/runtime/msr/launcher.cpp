@@ -14,6 +14,11 @@
 //     beside the AppImage) starts the game without the launcher (the direct start section below).
 // The user folder: beside the program (Windows, a portable folder; Linux when a user/ folder is there, also beside the
 // AppImage), else the system's (%LOCALAPPDATA%\msr-native, ~/.local/share/msr-native); MSR_NATIVE_HOME overrides it.
+// The Android app (native/android): the user folder is the app's on the shared storage (Android/data/<app>/files/user),
+// which a PC reaches over USB. Nothing is built there: the PC's launcher builds the Android native code (Build for
+// Android: build_module.py --target android-arm64, into user/msr/recomp-android/), which the player copies into the
+// same folder of the app's, with the game file (found in the user folder). Play starts the app again as the game
+// (android.c); there are no file dialogs, folders to open, updates or direct start there.
 #include <algorithm>
 #include <atomic>
 #include <chrono>
@@ -41,6 +46,9 @@
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#endif
+#ifdef __ANDROID__
+#include "android.h"
 #endif
 #include "dump.h"
 #include "ini.h"
@@ -168,6 +176,9 @@ bool Writable(const fs::path& dir) {
 // The folder that holds user/ (and that the game runs in)
 fs::path DataRoot() {
     if (const char* home = std::getenv("MSR_NATIVE_HOME"); home && *home) return FromUtf8(home);
+#ifdef __ANDROID__
+    return FromUtf8(msr_android_root());   // Android/data/<app>/files: reachable from a PC over USB
+#endif
     const fs::path exe_dir = ExePath().parent_path();
 #ifdef _WIN32
     if (Writable(exe_dir / "user")) return exe_dir;   // portable, as the zip unpacks
@@ -416,7 +427,7 @@ struct Download {
     std::uint64_t size;   // for the progress; 0 when unknown
     const char* file;
 };
-constexpr int KitVersion = 1;
+constexpr int KitVersion = 2;   // 2: Zig keeps the Android app's C headers (build_module.py ZIG_HEADERS_ANDROID)
 #ifdef _WIN32
 constexpr Download Downloads[] = {
     {"Python 3.12", "https://www.python.org/ftp/python/3.12.10/python-3.12.10-embed-amd64.zip",
@@ -480,12 +491,22 @@ struct State {
     Child update_tool;       // the update's current process (curl, tar): stopped when the launcher closes
     fs::path restart_into;   // after the window closes: this program's new version (an update)
     std::string direct;      // the direct start's program, written beside this one (its file name), or empty
+    bool android_build = false;   // the build under way is the Android app's (Build for Android)
+    Code code_before = Code::Missing;   // the native code's state before it, shown again after it
+    std::string android_note;     // the Android build's result: where it is, or what failed
 } S;
 
 void WriteDirect();   // the direct start section
 
+// The native code: recomp/ here, recomp-android/ in the Android app (the PC's Build for Android makes that folder,
+// which the player copies over with its module.json)
+#ifdef __ANDROID__
+constexpr const char* CodeFolder = "recomp-android";
+#else
+constexpr const char* CodeFolder = "recomp";
+#endif
 fs::path KitFolder() { return S.user / "msr" / "recomp-kit"; }
-fs::path LibraryPath() { return S.user / "msr" / "recomp" / Library; }
+fs::path LibraryPath() { return S.user / "msr" / CodeFolder / Library; }
 
 void Log(const std::string& text) {
     std::ofstream f(S.user / "msr" / "recomp-build.log", std::ios::binary | std::ios::app);
@@ -544,12 +565,14 @@ void CheckCode() {
     Code code = Code::Missing;
     std::string note;
     if (fs::is_regular_file(LibraryPath(), e)) {
-        const std::string json = ReadText(S.user / "msr" / "recomp" / "module.json");
+        const std::string json = ReadText(S.user / "msr" / CodeFolder / "module.json");
         const std::string runtime = JsonValue(json, "runtime_sha256"), built = JsonValue(json, "built");
         code = runtime == MSR_AOT_RUNTIME_SHA256 ? Code::Ready : Code::Outdated;
         if (!built.empty()) note = "Built " + built + (code == Code::Ready ? "." : " for another version of msr-native.");
     }
+#ifndef __ANDROID__
     if (code == Code::Ready) WriteDirect();   // the game can start: the program that starts it without the launcher
+#endif
     std::scoped_lock lock{S.lock};
     if (S.building) return;
     if (S.code != Code::Failed || code == Code::Ready) {
@@ -650,8 +673,9 @@ std::string Fail(const std::string& why) {
     return why;
 }
 
-// downloads the kit if needed, then runs build_module.py; "" when it succeeded, else what failed
-std::string Build(const std::string& game) {
+// downloads the kit if needed, then runs build_module.py; "" when it succeeded, else what failed. `android`: the
+// Android app's native code (--target android-arm64, into user/msr/recomp-android/), the PC's own left as it is.
+std::string Build(const std::string& game, bool android) {
     const fs::path scripts = Scripts();
     if (scripts.empty()) return Fail("The recompiler is missing from this installation (the recomp folder).");
     std::error_code e;
@@ -732,6 +756,10 @@ std::string Build(const std::string& game) {
     if (const char* j = std::getenv("MSR_BUILD_JOBS"); j && std::atoi(j) > 0) jobs = static_cast<unsigned>(std::atoi(j));
     std::vector<std::string> args{python, "-I", "-B", Utf8(scripts), "--dump", dump, "--user", Utf8(S.user), "--kit",
                                   Utf8(KitFolder()), "--jobs", std::to_string(jobs), "--port-version", MSR_NATIVE_VERSION};
+    if (android) {
+        args.push_back("--target");
+        args.push_back("android-arm64");
+    }
     for (const auto& entry : fs::directory_iterator(S.user / "msr", e)) {   // code an earlier run had to interpret
         const std::string name = Utf8(entry.path().filename());
         if (name.rfind("recomp-jit-entries-core", 0) == 0 && name.size() > 4 && name.compare(name.size() - 4, 4, ".txt") == 0) {
@@ -758,33 +786,49 @@ std::string Build(const std::string& game) {
     return {};
 }
 
-void StartBuild() {
+void StartBuild(bool android) {
+#ifdef __ANDROID__
+    return;   // built on a PC (Build for Android there)
+#endif
     std::string game;
     {
         std::scoped_lock lock{S.lock};
         if (S.building || S.game.empty() || !S.game_note.empty() || S.update == Snapshot::Update::Working) return;
         S.building = true;
         S.cancel = false;
+        S.android_build = android;
+        S.code_before = S.code;
         S.code = Code::Building;
-        S.code_note = "Starting";
+        S.code_note = android ? "Starting the Android build" : "Starting";
         S.progress = -1.f;
         S.dirty = true;
         game = S.game;
     }
     if (S.worker.joinable()) S.worker.join();
-    S.worker = std::thread([game] {
+    S.worker = std::thread([game, android] {
         const auto started = std::chrono::steady_clock::now();
-        const std::string error = Build(game);
+        const std::string error = Build(game, android);
         const auto seconds = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now() - started).count();
+        const std::string took = std::to_string(seconds / 60) + " min " + std::to_string(seconds % 60) + " s";
         {
             std::scoped_lock lock{S.lock};
             S.building = false;
             S.progress = -1.f;
-            S.code = error.empty() ? Code::Ready : Code::Failed;
-            S.code_note = error.empty() ? "Built in " + std::to_string(seconds / 60) + " min " + std::to_string(seconds % 60) + " s." : error;
+            if (android) {   // the PC's native code as it was; the Android build's result below the button
+                S.code = S.code_before;
+                S.code_note.clear();
+                S.android_note = error.empty()
+                    ? "Built in " + took + ": copy the folder user/msr/recomp-android into the Android app's user/msr " +
+                          "folder (over USB: Android/data/io.github.gminustwo.msrnative/files/user/msr), with your game " +
+                          "file in its user folder."
+                    : "The Android build failed: " + error;
+            } else {
+                S.code = error.empty() ? Code::Ready : Code::Failed;
+                S.code_note = error.empty() ? "Built in " + took + "." : error;
+            }
             S.dirty = true;
         }
-        if (error.empty()) CheckCode();
+        if (error.empty() || android) CheckCode();
     });
 }
 
@@ -799,6 +843,8 @@ void CancelBuild() {
 bool CanBrowse() {
 #ifdef _WIN32
     return true;
+#elif defined(__ANDROID__)
+    return false;   // the game file is found in the user folder (FindGame)
 #else
     return std::system("command -v zenity >/dev/null 2>&1 || command -v kdialog >/dev/null 2>&1") == 0;
 #endif
@@ -841,6 +887,8 @@ void OpenFolder(const fs::path& dir) {
     fs::create_directories(dir, e);
 #ifdef _WIN32
     ShellExecuteW(nullptr, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__ANDROID__)
+    (void)dir;   // the overlay shows the folder instead
 #else
     Child c;
     if (Spawn({"xdg-open", Utf8(dir)}, {}, false, {}, true, c)) std::thread([c]() mutable { Poll(c, true); Close(c); }).detach();
@@ -1380,6 +1428,14 @@ bool StartGame() {
                                   "--filter=fsr", "--volume=" + std::to_string(std::clamp(volume, 0, 100))};
     if (fullscreen) args.push_back("--fullscreen=borderless");
     if (!vsync) args.push_back("--vsync=off");
+#ifdef __ANDROID__
+    {   // the app again, as the game (main.c logs to user/msr-native.log there); this process ends
+        std::fprintf(stderr, "launcher: starting the game\n");
+        std::vector<const char*> argv;
+        for (std::size_t i = 1; i < args.size(); ++i) argv.push_back(args[i].c_str());
+        msr_android_relaunch(static_cast<int>(argv.size()), argv.data());
+    }
+#endif
     const fs::path log = S.root / "user" / "msr-native.log";
     std::error_code e;
     fs::remove(log, e);   // each run's own log (the game writes it through this handle)
@@ -1417,6 +1473,12 @@ void Publish() {
         s.update_progress = S.update_progress;
         s.update_installable = S.update_installable;
         s.direct = S.direct;
+#ifdef __ANDROID__
+        s.can_build = false;   // built on a PC (its Build for Android)
+#else
+        s.android_build = true;
+        s.android_note = S.android_note;
+#endif
     }
     static const bool browse = CanBrowse();
     s.can_browse = browse;
@@ -1443,7 +1505,8 @@ extern "C" void msr_launcher_action(int kind, const char* text) {
         }
         break;
     }
-    case Kind::LauncherBuild: StartBuild(); break;
+    case Kind::LauncherBuild: StartBuild(false); break;
+    case Kind::LauncherBuildAndroid: StartBuild(true); break;
     case Kind::LauncherCancel: CancelBuild(); break;
     case Kind::LauncherBrowse: {
         std::string current;
@@ -1505,10 +1568,40 @@ void Setup() {
 #endif
 }
 
+#ifdef __ANDROID__
+// A game file copied into the user folder (or its game/ folder): the first that can be the game, else the first found
+std::string FindGame() {
+    std::string first;
+    for (const fs::path& dir : {S.user, S.user / "game", S.root}) {
+        std::error_code e;
+        for (const auto& entry : fs::directory_iterator(dir, e)) {
+            std::string ext = Utf8(entry.path().extension());
+            std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) { return std::tolower(ch); });
+            if (ext != ".3ds" && ext != ".cci" && ext != ".cxi" && ext != ".zcci" && ext != ".zcxi") continue;
+            const std::string path = Utf8(entry.path());
+            if (CheckGame(path).empty()) return path;
+            if (first.empty()) first = path;
+        }
+    }
+    return first;
+}
+#endif
+
 void ReadGame() {
+    std::string game = Trim(ReadText(S.user / "msr" / "game-path.txt"));
+#ifdef __ANDROID__
+    std::error_code e;
+    if (game.empty() || !fs::is_regular_file(FromUtf8(game), e)) {   // copied in over USB: found there
+        game = FindGame();
+        if (!game.empty()) WriteText(S.user / "msr" / "game-path.txt", game + "\n");
+    }
+#endif
     std::scoped_lock lock{S.lock};
-    S.game = Trim(ReadText(S.user / "msr" / "game-path.txt"));
+    S.game = game;
     S.game_note = CheckGame(S.game);
+#ifdef __ANDROID__
+    if (S.game.empty()) S.game_note = "Copy your game file (a decrypted .3ds, .cci, .cxi or .zcci) into the user folder below.";
+#endif
 }
 
 // The launcher's window until it is closed. 0 when closed normally.
@@ -1532,7 +1625,9 @@ int Launcher() {
         return 1;
     }
     Publish();
+#ifndef __ANDROID__
     S.update_checker = std::thread([] { CleanUpdate(); CheckForUpdate(); });   // a newer release (the updates section)
+#endif
     for (;;) {
         bool playing;
         {

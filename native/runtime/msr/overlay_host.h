@@ -21,6 +21,7 @@ int  msr_overlay_event(const SDL_Event *e, float sx, float sy);
 int  msr_overlay_visible(void);
 int  msr_overlay_capturing(void);     /* waiting for a key or pad button to bind */
 void msr_overlay_toggle(void);        /* F1, Select */
+int  msr_overlay_launcher_mode(void); /* the menu is the launcher's (no game behind it) */
 void msr_overlay_fullscreen(int on);  /* fullscreen changed by a hotkey */
 void msr_overlay_hdr(int option, float peak, float paper);   /* video.c: HDR possible (2), off on the display (1), absent (0); nits */
 

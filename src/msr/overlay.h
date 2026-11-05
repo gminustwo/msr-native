@@ -158,6 +158,11 @@ struct LauncherSnapshot {
     /// The program beside the launcher that starts the game without it (msr-native-direct.exe), once
     /// the native code is built; empty when there is none
     std::string direct;
+    /// The native code can be built here (not in msr-native's Android app: a PC builds it there)
+    bool can_build = true;
+    /// msr-native on a PC: the Android app's native code can be built too (Build for Android)
+    bool android_build = false;
+    std::string android_note; ///< The Android build's result: where to copy it, or what failed
 };
 
 struct OverlayAction {
@@ -188,6 +193,7 @@ struct OverlayAction {
         DumpTextures,     ///< Save the game's textures for making packs (`value` 0 or 1)
         LauncherPlay,     ///< Start the game
         LauncherBuild,    ///< Build the native code from the game file
+        LauncherBuildAndroid, ///< msr-native: build the Android app's native code (on a PC)
         LauncherCancel,   ///< Stop the build
         LauncherBrowse,   ///< Choose the game file with a file dialog
         LauncherGame,     ///< The game file typed in: `text`

@@ -26,6 +26,7 @@
 #include "pica_int.h"
 #include "msr/msr.h"
 #include <vulkan/vulkan.h>
+#include "vk_push.h"
 #include <stdio.h>
 #include <time.h>
 #include <stdlib.h>
@@ -62,7 +63,6 @@ static VkCommandPool cpool; static VkCommandBuffer cb_up, cb_draw; static VkFenc
 static VkCommandBuffer cb_part[MAX_PARTS][2]; static int part;
 static VkDescriptorSetLayout dsl; static VkPipelineLayout playout; static VkShaderModule vs_mod, vsi_mod, fs_mod, fs_nd_mod;
 static int gpu_vs = 1;
-static PFN_vkCmdPushDescriptorSetKHR push_desc;
 static VkFormat depth_format;
 static int has_stencil; static VkImageAspectFlags ds_aspect;
 static int depth_blit;   /* the depth format can be blitted: a depth target is written back from a 1x copy (nearest) */   /* D32_SFLOAT_S8_UINT when available: stencil for D24S8 targets */
@@ -131,6 +131,7 @@ typedef struct {
     Img dead[512]; int ndead;   /* images let go while it was current: destroyed once its next batch has finished */
     VkBuffer dbuf[8]; VkDeviceMemory dmem[8]; int ndbuf;   /* one-off upload buffers (up_alloc), likewise */
     VkBuffer sbuf[MAX_SBUF]; VkDeviceMemory smem[MAX_SBUF]; int nsbuf;   /* texture packs' staging buffers (stage_make), likewise */
+    VkPushArena push;   /* its draws' descriptor sets where the device has no push descriptors (vk_push.c), likewise */
 } BatchSet;
 static BatchSet sets[NSETS]; static int cur_set;
 static void img_destroy(Img *im) { vkDestroyImageView(dev, im->view, NULL); vkDestroyImage(dev, im->img, NULL); vkFreeMemory(dev, im->mem, NULL); }
@@ -502,6 +503,7 @@ static void set_next(void) {
         if (b->qp && !vkGetQueryPoolResults(dev, b->qp, 0, 2, sizeof ts, ts, 8, VK_QUERY_RESULT_64_BIT) && ts[1] > ts[0])
             g_vk_gpu_us += (unsigned long long)((double)(ts[1] - ts[0]) * ts_period / 1000.0);
     }
+    vk_push_reset(&b->push);   /* its last batch has finished */
     set_free_dead(b);
     for (int k = 0; k < 8; k++) *set_ring_ptr[k] = b->rings[k];
     memcpy(cb_part, b->cb, sizeof cb_part); fence = b->fence;
@@ -1252,8 +1254,6 @@ static int init(void) {
     ds_aspect = VK_IMAGE_ASPECT_DEPTH_BIT | (has_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
     { VkFormatProperties dp; vkGetPhysicalDeviceFormatProperties(phys, depth_format, &dp);
       depth_blit = (dp.optimalTilingFeatures & (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT)) == (VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT); }
-    push_desc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(dev, "vkCmdPushDescriptorSetKHR");
-    if (!push_desc) return -1;
     VkCommandPoolCreateInfo pci = { .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO, .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = qfam };
     if (vkCreateCommandPool(dev, &pci, NULL, &cpool)) return -1;
     VkCommandBufferAllocateInfo cai = { .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, .commandPool = cpool, .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, .commandBufferCount = 2 * MAX_PARTS };
@@ -1276,10 +1276,11 @@ static int init(void) {
         { 6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL },
         { 7, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT, NULL } };
     VkDescriptorSetLayoutCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
-        .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR, .bindingCount = 8, .pBindings = b };
+        .flags = vk_push_layout_flags(), .bindingCount = 8, .pBindings = b };
     if (vkCreateDescriptorSetLayout(dev, &dci, NULL, &dsl)) return -1;
     VkPipelineLayoutCreateInfo lci = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl };
     if (vkCreatePipelineLayout(dev, &lci, NULL, &playout)) return -1;
+    vk_push_layout(playout, dsl);
     VkShaderModuleCreateInfo sci = { .sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = sizeof vert_spv, .pCode = vert_spv };
     if (vkCreateShaderModule(dev, &sci, NULL, &vs_mod)) return -1;
     sci.codeSize = sizeof vs_spv; sci.pCode = vs_spv;
@@ -1378,7 +1379,7 @@ static void replay(const DrawRec *r, VkPipeline *bound) {
         w[i] = (VkWriteDescriptorSet){ .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = bind[i], .descriptorCount = 1, .descriptorType = ty[i] };
         if (i < 2) w[i].pBufferInfo = &r->b[i]; else if (i < 5) w[i].pImageInfo = &r->ii[i - 2]; else w[i].pBufferInfo = &r->b[i - 3];
     }
-    push_desc(cb_draw, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 0, r->gpu ? 8 : 5, w);
+    vk_push(&sets[cur_set].push, cb_draw, VK_PIPELINE_BIND_POINT_GRAPHICS, playout, 0, r->gpu ? 8 : 5, w);
     if (!r->gpu) vkCmdBindVertexBuffers(cb_draw, 0, 1, &vbuf.buf, &r->voff);
     vkCmdBindIndexBuffer(cb_draw, ibuf.buf, r->ioff, VK_INDEX_TYPE_UINT32);
     if (dbg != 2) vkCmdDrawIndexed(cb_draw, r->nidx, 1, 0, 0, 0);

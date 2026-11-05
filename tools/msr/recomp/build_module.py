@@ -29,6 +29,10 @@ Options:
   --port-version   recorded in module.json, so the launcher knows when to offer a rebuild
   --keep-work      keep the generated code and objects (<user>/msr/recomp-build/) for faster
                    rebuilds; by default only the library stays
+  --target T       host (default: this PC's msr-native), or android-arm64: libmsr_aot.so for the
+                   Android app, cross-compiled with the kit's Zig into <user>/msr/recomp-android/
+                   (the generated code is the same; aot_runtime.h's SSE intrinsics come from
+                   src/core/arm/msr_aot/a64/ there, on AArch64's FPCR)
 
 Output protocol for the launcher (stdout, one per line): "@step <n> <count> <text>",
 "@progress <done> <total>", "@done <json>", "@error <text>". Everything else is log.
@@ -54,6 +58,7 @@ import zipfile
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[2]  # the source tree, or the package's recomp/ folder (same layout)
 RUNTIME = REPO / 'src' / 'core' / 'arm' / 'msr_aot'
+A64 = RUNTIME / 'a64'  # <emmintrin.h>/<xmmintrin.h> for AArch64 (msr_sse_a64.h)
 sys.path.insert(0, str(HERE))
 
 PROGRAM_ID = '00040000001BB200'
@@ -63,6 +68,11 @@ STEPS = 5
 WINDOWS = os.name == 'nt'
 LIBRARY = 'msr_aot.dll' if WINDOWS else 'libmsr_aot.so'
 NO_WINDOW = 0x08000000 if WINDOWS else 0  # CREATE_NO_WINDOW
+ANDROID = 'android-arm64'
+# The C library functions the Android library may call, for the stand-in libc.so it links against
+# (Android's own libc.so provides them when the app loads it).
+ANDROID_LIBC = ['memcpy', 'memmove', 'memset', 'memcmp', 'strlen', 'strncmp', 'strcmp', 'malloc', 'calloc',
+                'realloc', 'free', 'abort', '__cxa_atexit', '__cxa_finalize', '__stack_chk_fail', '__stack_chk_guard']
 
 
 class BuildError(Exception):
@@ -77,16 +87,20 @@ def log(text):
     print(text, flush=True)
 
 
-def runtime_sha256():
-    """aot_runtime.h without carriage returns, as src/core/CMakeLists.txt hashes it."""
-    return hashlib.sha256((RUNTIME / 'aot_runtime.h').read_bytes().replace(b'\r', b'')).hexdigest()
+def runtime_sha256(target='host'):
+    """aot_runtime.h without carriage returns, as src/core/CMakeLists.txt hashes it; for Android
+    followed by a64/msr_sse_a64.h, as native/CMakeLists.txt hashes them there."""
+    text = (RUNTIME / 'aot_runtime.h').read_bytes().replace(b'\r', b'')
+    if target == ANDROID:
+        text += (A64 / 'msr_sse_a64.h').read_bytes().replace(b'\r', b'')
+    return hashlib.sha256(text).hexdigest()
 
 
-def recipe_sha256():
+def recipe_sha256(target='host'):
     """Everything besides the dump that decides the library's contents."""
     digest = hashlib.sha256()
     files = sorted(HERE.glob('*.py')) + sorted(HERE.glob('*.txt')) + [HERE / 'ticks.cpp'] + \
-        sorted(RUNTIME.glob('aot_*'))
+        sorted(RUNTIME.glob('aot_*')) + (sorted(A64.glob('*.h')) if target == ANDROID else [])
     for path in files:
         digest.update(path.name.encode() + b'\0' + path.read_bytes().replace(b'\r', b''))
     return digest.hexdigest()
@@ -100,6 +114,7 @@ class Compiler:
     def __init__(self, args):
         self.zig = None
         self.cache = None
+        self.android = getattr(args, 'target', 'host') == ANDROID
         # Each parallel compile gets its own Zig cache: many at once in one cache sometimes
         # failed with exit code 5 (access denied) and no message on Windows.
         self.slots = queue.Queue()
@@ -129,6 +144,12 @@ class Compiler:
                            '-mcpu=x86_64_v2']
         else:
             self.target = ['-march=x86-64-v2']
+        if self.android:
+            # Any 64-bit ARM phone (ARMv8.0). musl's headers stand in for Android's C library: the
+            # library calls only memcpy-like functions, linked against a stand-in libc.so (link).
+            if not self.zig:
+                raise BuildError('The Android build needs the kit\'s Zig: download the build tools in the launcher.')
+            self.target = ['-target', 'aarch64-linux-musl', '-mcpu=generic']
 
     def version(self):
         try:
@@ -139,10 +160,13 @@ class Compiler:
             return self.name
 
     def flags(self):
-        flags = self.target + ['-std=c++20', '-O1', '-g0', '-w', '-ffp-contract=off', '-fno-strict-aliasing',
-                               '-fno-exceptions', '-fno-rtti', '-fvisibility=hidden',
-                               '-DMSR_AOT_SHARED', '-I', str(RUNTIME)]
-        if not WINDOWS:
+        flags = self.target + (['-I', str(A64)] if self.android else []) + \
+            ['-std=c++20', '-O1', '-g0', '-w', '-ffp-contract=off', '-fno-strict-aliasing',
+             '-fno-exceptions', '-fno-rtti', '-fvisibility=hidden',
+             '-DMSR_AOT_SHARED', '-I', str(RUNTIME)]
+        if self.android:
+            flags += ['-fno-threadsafe-statics', '-fno-stack-protector']   # no C++ runtime there
+        if not WINDOWS or self.android:
             flags.append('-fPIC')
         return flags
 
@@ -172,6 +196,20 @@ class Compiler:
         rsp = cwd / 'link.rsp'
         rsp.write_text('\n'.join('"%s"' % o.replace('\\', '/') for o in objects) + '\n')
         cmd = self.command + self.target + ['-shared', '-s', '-o', str(out), '@link.rsp']
+        if self.android:
+            # No C or C++ library linked in: the functions it calls come from Android's libc.so
+            # (DT_NEEDED on a stand-in made here). 16 KB pages (Android 15), and nothing undefined.
+            stub = cwd / 'android-libc'
+            stub.mkdir(exist_ok=True)
+            (stub / 'libc.c').write_text(''.join('void %s(void) {}\n' % name for name in ANDROID_LIBC
+                                                 if name != '__stack_chk_guard') + 'long __stack_chk_guard;\n')
+            result = subprocess.run(self.command[:-1] + ['cc'] + self.target +
+                                    ['-shared', '-nostdlib', '-Wl,-soname,libc.so', '-o', str(stub / 'libc.so'),
+                                     str(stub / 'libc.c')], capture_output=True, text=True, creationflags=NO_WINDOW)
+            if result.returncode != 0:
+                raise BuildError('The stand-in libc.so failed:\n%s' % (result.stderr or result.stdout)[-4000:])
+            cmd += ['-nostdlib', '-Wl,-z,max-page-size=16384', '-Wl,-z,defs', '-Wl,-soname,libmsr_aot.so',
+                    str(stub / 'libc.so')]
         if not self.zig and WINDOWS:
             cmd += ['-static-libgcc', '-static-libstdc++']
         result = subprocess.run(cmd, capture_output=True, text=True, cwd=str(cwd), creationflags=NO_WINDOW)
@@ -249,7 +287,7 @@ def compile_all(work, compiler, jobs):
     generated = work / 'generated'
     objects = work / 'obj'
     objects.mkdir(parents=True, exist_ok=True)
-    runtime_hash = runtime_sha256()
+    runtime_hash = runtime_sha256(ANDROID if compiler.android else 'host')
     sources = sorted(generated.glob('aot_*.cpp')) + [RUNTIME / 'aot_module.cpp']
     # Objects are reused when their source and the flags are unchanged.
     stamp = json.dumps({'cmd': compiler.command, 'flags': compiler.flags(), 'runtime': runtime_hash,
@@ -309,21 +347,24 @@ def compile_all(work, compiler, jobs):
 
 
 def install(work, user, compiler, objects, stats, args, started):
-    out_dir = user / 'msr' / 'recomp'
+    out_dir = user / 'msr' / ('recomp-android' if compiler.android else 'recomp')
+    library = 'libmsr_aot.so' if compiler.android else LIBRARY
     out_dir.mkdir(parents=True, exist_ok=True)
-    temporary = work / ('new-' + LIBRARY)
+    temporary = work / ('new-' + library)
     if temporary.exists():
         temporary.unlink()
     compiler.link(objects, temporary, work / 'obj')
-    target = out_dir / LIBRARY
+    target = out_dir / library
     try:
         os.replace(temporary, target)
     except PermissionError:
         raise BuildError('The game is still using the recompiled code: stop the game and build again.')
+    kind = ANDROID if compiler.android else 'host'
     info = {
         'port_version': args.port_version or '',
-        'runtime_sha256': runtime_sha256(),
-        'recipe_sha256': recipe_sha256(),
+        'target': kind,
+        'runtime_sha256': runtime_sha256(kind),
+        'recipe_sha256': recipe_sha256(kind),
         'code_sha256': CODE_SHA256,
         'compiler': compiler.version(),
         'built': time.strftime('%Y-%m-%d %H:%M:%S'),
@@ -341,7 +382,7 @@ def install(work, user, compiler, objects, stats, args, started):
 def build(args):
     started = time.time()
     user = pathlib.Path(args.user).resolve()
-    work = user / 'msr' / 'recomp-build'
+    work = user / 'msr' / ('recomp-build-android' if args.target == ANDROID else 'recomp-build')
     compiler = Compiler(args)
     log('Compiler: %s' % ' '.join(compiler.command))
     extras = [pathlib.Path(p) for p in args.extra if pathlib.Path(p).is_file()]
@@ -372,9 +413,11 @@ def build(args):
 ZIG_TRIM_COMMON = ['doc', 'lib/libtsan', 'lib/libc/musl', 'lib/libc/wasi', 'lib/libc/darwin',
                    'lib/libc/freebsd', 'lib/libc/netbsd', 'lib/libc/openbsd']
 ZIG_TRIM = ZIG_TRIM_COMMON + (['lib/libc/glibc'] if WINDOWS else ['lib/libc/mingw'])
-# The C library headers kept (lib/libc/include/<target>): this system's only.
+# The C library headers kept (lib/libc/include/<target>): this system's, and the Android library's
+# (--target android-arm64 compiles against musl's AArch64 headers; about 7 MB).
+ZIG_HEADERS_ANDROID = {'any-linux-any', 'generic-musl', 'aarch64-linux-any', 'aarch64-linux-musl'}
 ZIG_HEADERS_KEEP = ({'any-windows-any'} if WINDOWS else
-                    {'any-linux-any', 'generic-glibc', 'x86-linux-any', 'x86-linux-gnu'})
+                    {'any-linux-any', 'generic-glibc', 'x86-linux-any', 'x86-linux-gnu'}) | ZIG_HEADERS_ANDROID
 
 
 def setup_kit(args):
@@ -429,6 +472,7 @@ def main():
     parser.add_argument('--extra', action='append', default=[])
     parser.add_argument('--port-version')
     parser.add_argument('--keep-work', action='store_true')
+    parser.add_argument('--target', choices=['host', ANDROID], default='host')
     parser.add_argument('--setup-kit')
     parser.add_argument('--zig-archive')
     parser.add_argument('--wheel')
@@ -438,7 +482,7 @@ def main():
         sys.path.insert(1, str(pathlib.Path(args.kit) / 'site'))
     try:
         if args.info:
-            print(json.dumps({'runtime_sha256': runtime_sha256(), 'recipe_sha256': recipe_sha256()}))
+            print(json.dumps({'runtime_sha256': runtime_sha256(args.target), 'recipe_sha256': recipe_sha256(args.target)}))
         elif args.setup_kit:
             if not (args.zig_archive and args.wheel):
                 parser.error('--setup-kit needs --zig-archive and --wheel')

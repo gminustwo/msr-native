@@ -29,6 +29,20 @@ msr-native.exe (Linux: msr-native-direct.sh beside the AppImage). It starts the 
 away, without the launcher: use it for a desktop shortcut, Steam or a frontend. When the game
 cannot start yet (no game file, or the native code needs building), it opens the launcher.
 
+Android
+-------
+The Android app (msr-native-<version>-android-arm64.apk: Android 10 or newer, a 64-bit
+phone or handheld with Vulkan 1.3, and a controller) cannot build the native code itself:
+the PC version builds it for the app.
+1. On the PC, with your game file chosen: Game tab, "Build for Android" (a few minutes).
+2. Install the APK and start it once, so it makes its folder.
+3. Connect the device to the PC over USB and open its storage. In
+   Android/data/io.github.gminustwo.msrnative/files/user, put your game file, and copy the
+   PC's user/msr/recomp-android folder into the user/msr folder there.
+4. Start the app: the launcher finds both. Play.
+The Back button opens the game's menu (Restart, Quit). Saves and settings are in the same
+user folder on the device. There are no touch controls: use a controller (or a keyboard).
+
 Updates
 -------
 When a new version is out, the launcher's Game tab says so when it starts. "Update now"

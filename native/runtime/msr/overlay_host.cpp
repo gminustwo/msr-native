@@ -394,6 +394,10 @@ extern "C" int msr_overlay_capturing(void) {
     return capturing >= 0;
 }
 
+extern "C" int msr_overlay_launcher_mode(void) {
+    return launcher_mode;
+}
+
 extern "C" void msr_overlay_toggle(void) {
     if (!O().Visible()) {
         input_release_all();
@@ -551,6 +555,7 @@ extern "C" void msr_overlay_frame(void) {
             break;
         case Kind::LauncherPlay:
         case Kind::LauncherBuild:
+        case Kind::LauncherBuildAndroid:
         case Kind::LauncherCancel:
         case Kind::LauncherBrowse:
         case Kind::LauncherGame:

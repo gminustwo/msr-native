@@ -851,9 +851,11 @@ void Overlay::DrawGameMods(const std::function<void()>& default_focus) {
                                   default_focus);
     ImGui::EndChild();
 
+#ifndef __ANDROID__   // msr-native's Android app: the folder above, reached from a PC over USB
     if (ImGui::Button("Open the mods folder", {-FLT_MIN, 0.f})) {
         Act(OverlayAction::Kind::GameModsFolder);
     }
+#endif
     if (count == 0) {
         default_focus();
     }
@@ -881,9 +883,11 @@ void Overlay::DrawTexturePacks(float label_width, const std::function<void()>& d
                                   OverlayAction::Kind::TexturePackDown, default_focus);
     ImGui::EndChild();
 
+#ifndef __ANDROID__   // msr-native's Android app: the folder above, reached from a PC over USB
     if (ImGui::Button("Open the texture packs folder", {-FLT_MIN, 0.f})) {
         Act(OverlayAction::Kind::ModsFolder);
     }
+#endif
     if (count == 0) {
         default_focus();
     }
@@ -1007,10 +1011,17 @@ void Overlay::DrawMenu(float scale, bool appearing) {
             ImGui::Spacing();
             const ImVec2 button{-FLT_MIN, 0.f};
             if (l.active) {
+#ifdef __ANDROID__
+                // msr-native's Android app: no folders to open; a PC reaches this one over USB
+                Note(("The user folder (saves, settings, game mods, texture packs, the game file and the native "
+                      "code): " + l.folder + ". From a PC over USB: Android/data/io.github.gminustwo.msrnative/files/user.")
+                         .c_str());
+#else
                 if (ImGui::Button("Open the user folder", button)) {
                     Act(OverlayAction::Kind::LauncherFolder);
                 }
                 Note(("Saves, settings, game mods and texture packs: " + l.folder).c_str());
+#endif
             } else {
                 if (ImGui::Button("Resume", button)) {
                     SetVisible(false);
@@ -1333,6 +1344,15 @@ void Overlay::DrawLauncher(const LauncherSnapshot& l, float label_width,
         if (ImGui::Button("Cancel", {width, 0.f})) {
             Act(OverlayAction::Kind::LauncherCancel);
         }
+    } else if (!l.can_build) {
+        // msr-native's Android app: the native code comes from a PC (its launcher's Build for Android)
+        if (l.code != Code::Ready) {
+            ImGui::PushTextWrapPos(0.f);
+            Note("Build it on a PC: in msr-native for Windows or Linux, choose the same game file and click Build for "
+                 "Android on its Game tab. Then copy the recomp-android folder it makes (in its user/msr folder) into "
+                 "this app's user/msr folder, shown below.");
+            ImGui::PopTextWrapPos();
+        }
     } else {
         ImGui::BeginDisabled(l.game.empty() || !l.game_note.empty());
         if (ImGui::Button(l.code == Code::Missing ? "Build the native code" : "Rebuild the native code", {width, 0.f})) {
@@ -1351,6 +1371,19 @@ void Overlay::DrawLauncher(const LauncherSnapshot& l, float label_width,
     if (l.code == Code::Ready && !l.direct.empty()) {
         ImGui::PushTextWrapPos(0.f);
         Note(("To play without this menu, start " + l.direct + " in the program's folder.").c_str());
+        ImGui::PopTextWrapPos();
+    }
+    if (l.android_build && l.code != Code::Building) {   // the Android app's native code, built here for it
+        ImGui::Spacing();
+        ImGui::BeginDisabled(l.game.empty() || !l.game_note.empty());
+        if (ImGui::Button("Build for Android", {width, 0.f})) {
+            Act(OverlayAction::Kind::LauncherBuildAndroid);
+        }
+        ImGui::EndDisabled();
+        ImGui::PushTextWrapPos(0.f);
+        Note(l.android_note.empty() ? "The native code for msr-native's Android app, from the same game file: a few "
+                                      "minutes, then copied to the phone or handheld."
+                                    : l.android_note.c_str());
         ImGui::PopTextWrapPos();
     }
     ImGui::EndGroup();

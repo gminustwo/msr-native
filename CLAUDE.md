@@ -28,6 +28,15 @@
 - Releases: README.md (Releases). The Linux build runs in WSL Ubuntu, launched from PowerShell (Git Bash mangles
   /mnt paths); WSL has no SDL2 headers and sudo needs a password, so SDL2 is built from
   ~/samus-build/src/externals/sdl2/SDL (`MSR_SDL2_SOURCE`).
+- The Android app (README.md, Android): `native/android`, built with Gradle from PowerShell (README.md, Releases; the
+  sources are in `D:\Games\pcports\msr-native-android-deps`). Its native build is capped by CMake job pools
+  (`msr.jobs`, 8): never remove them. Its native code: `build_module.py --target android-arm64` (a kit in
+  `test-build\user\msr\recomp-kit`), into `user/msr/recomp-android/`. Test in the `Medium_Phone_API_37.0` emulator
+  started `-read-only -no-window -gpu host` (arm64 code runs translated, ~30 FPS at the title); push the dump and
+  `recomp-android/` into `/sdcard/Android/data/io.github.gminustwo.msrnative/files/user` with adb, screenshots with
+  `adb exec-out screencap -p` from Bash (PowerShell's redirection breaks the PNG), keys with
+  `adb shell input keyevent --longpress <code>` (a plain keyevent is shorter than a frame: F is 34, Enter 66, Back 4).
+  The release key is `C:\Users\Lou\.android\msr-native-release.jks` (alias msr-native, password in the .txt beside it).
 - `native/README.md` documents the runtime, its Samus Returns parts and the debugging switches (`PWR_*`).
 - The emulator-based build (Azahar fork, Qt launcher) is the separate `samus-recomps` repository. It shares `src/msr`
   with this one, and changes there are not synced automatically.

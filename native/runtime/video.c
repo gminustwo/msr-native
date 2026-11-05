@@ -26,6 +26,7 @@
 #include <SDL_syswm.h>
 #include <vulkan/vulkan.h>
 #include "msr/overlay_host.h"
+#include "vk_push.h"
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -119,6 +120,9 @@ int video_option(const char *name, const char *value) {
 }
 
 static void apply_fullscreen(void) {
+#ifdef __ANDROID__
+    return;   /* always the whole screen there (video_init) */
+#endif
     SDL_SetWindowFullscreen(win, opt_fs == 1 ? SDL_WINDOW_FULLSCREEN_DESKTOP : opt_fs == 2 ? SDL_WINDOW_FULLSCREEN : 0);
 }
 
@@ -216,7 +220,7 @@ static VkBuffer up_buf; static VkDeviceMemory up_mem; static uint8_t *up_ptr;   
 #define UI_KMAX 4
 static uint8_t toast_px[TOAST_W * TOAST_H * 4 * UI_KMAX * UI_KMAX];   /* layout label (next_layout) */
 #define UP_TOAST (sizeof top_px + sizeof bot_px)
-static PFN_vkCmdPushDescriptorSetKHR push_desc;
+static VkPushArena push_arena;   /* the stand-in descriptor sets of the frame (vk_push.c), reset at its fence */
 typedef struct { float dst[4], src[4]; int mode[4]; float extra[4]; } Push;
 typedef struct { float dst[4], src[4], style[4]; int flags[4]; float color[4]; } MsrPush;   /* msr.vert / msr.frag */
 
@@ -267,8 +271,6 @@ static VkPipeline make_pipe(const uint32_t *fs, size_t fs_size, VkFormat fmt) { 
 
 static int gpu_init(void) {
     if (!vk13) return -1;
-    push_desc = (PFN_vkCmdPushDescriptorSetKHR)vkGetDeviceProcAddr(dev, "vkCmdPushDescriptorSetKHR");
-    if (!push_desc) return -1;
     if (img_make(&tex_top, TOP_W, SCR_H, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT) ||
         img_make(&tex_bot, BOT_W, SCR_H, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) return -1;
     VkBufferCreateInfo bi = { .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = UP_TOAST + sizeof toast_px, .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT };
@@ -282,12 +284,13 @@ static int gpu_init(void) {
         .addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE, .addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE };
     VK(vkCreateSampler(dev, &si, NULL, &smp_linear));
     VkDescriptorSetLayoutBinding b = { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL };
-    VkDescriptorSetLayoutCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+    VkDescriptorSetLayoutCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = vk_push_layout_flags(),
         .bindingCount = 1, .pBindings = &b };
     VK(vkCreateDescriptorSetLayout(dev, &dci, NULL, &dsl));
     VkPushConstantRange pr = { VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(Push) };
     VkPipelineLayoutCreateInfo pli = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
     VK(vkCreatePipelineLayout(dev, &pli, NULL, &play));
+    vk_push_layout(play, dsl);
     target_fmt = sdr_format == VK_FORMAT_B8G8R8A8_SRGB ? VK_FORMAT_B8G8R8A8_UNORM : sdr_format == VK_FORMAT_R8G8B8A8_SRGB ? VK_FORMAT_R8G8B8A8_UNORM : sdr_format;
     static const uint32_t fs_present[] =
 #include "present.frag.inc"
@@ -313,6 +316,7 @@ static int gpu_init(void) {
         VkPushConstantRange mr2 = { VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(MsrPush) };
         VkPipelineLayoutCreateInfo ml = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl, .pushConstantRangeCount = 1, .pPushConstantRanges = &mr2 };
         VK(vkCreatePipelineLayout(dev, &ml, NULL, &play_msr));
+        vk_push_layout(play_msr, dsl);
         pipe_msr = make_pipe_with(vs_msr, sizeof vs_msr, fs_msr, sizeof fs_msr, target_fmt, play_msr);
         pipe_msr_ui = make_pipe_ex(vs_msr, sizeof vs_msr, fs_msr, sizeof fs_msr, target_fmt, play_msr, 1);
         if (!pipe_msr || !pipe_msr_ui) return -1;
@@ -321,11 +325,12 @@ static int gpu_init(void) {
     {   /* HDR: two images (game, interface), present.vert's push constants; the pipeline is made for the swapchain's format */
         VkDescriptorSetLayoutBinding hb[2] = { { 0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL },
                                                { 1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, NULL } };
-        VkDescriptorSetLayoutCreateInfo hci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR,
+        VkDescriptorSetLayoutCreateInfo hci = { .sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .flags = vk_push_layout_flags(),
             .bindingCount = 2, .pBindings = hb };
         VK(vkCreateDescriptorSetLayout(dev, &hci, NULL, &dsl_hdr));
         VkPipelineLayoutCreateInfo hl = { .sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = 1, .pSetLayouts = &dsl_hdr, .pushConstantRangeCount = 1, .pPushConstantRanges = &pr };
         VK(vkCreatePipelineLayout(dev, &hl, NULL, &play_hdr));
+        vk_push_layout(play_hdr, dsl_hdr);
     }
     if (!pipe_ui) return -1;
     /* tex_toast: made at its first use, at the scale of that moment (ui_img) */
@@ -399,12 +404,25 @@ static int create_swapchain(void) {
     }
     sc_extent = caps.currentExtent;
     if (sc_extent.width == UINT32_MAX) { int w, h; SDL_Vulkan_GetDrawableSize(win, &w, &h); sc_extent.width = (uint32_t)w; sc_extent.height = (uint32_t)h; }
+    VkSurfaceTransformFlagBitsKHR transform = caps.currentTransform;
+#ifdef __ANDROID__
+    /* a phone held sideways has a 90 degree transform (its panel is portrait): the picture stays upright in landscape
+       (identity), sized as the window is (drivers differ on which way round they report the size), and the compositor
+       turns it */
+    if (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
+    { int w, h; SDL_Vulkan_GetDrawableSize(win, &w, &h); if (w > 0 && h > 0) { sc_extent.width = (uint32_t)w; sc_extent.height = (uint32_t)h; } }
+#endif
     if (!sc_extent.width || !sc_extent.height) return 0;   /* minimised: try again next frame */
+    /* opaque, or what the surface has (Android's often only inherit) */
+    VkCompositeAlphaFlagBitsKHR alpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if (!(caps.supportedCompositeAlpha & alpha))
+        for (uint32_t bit = 1; bit <= VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR; bit <<= 1)
+            if (caps.supportedCompositeAlpha & bit) { alpha = (VkCompositeAlphaFlagBitsKHR)bit; break; }
     uint32_t n = caps.minImageCount + 1; if (caps.maxImageCount && n > caps.maxImageCount) n = caps.maxImageCount;
     VkSwapchainCreateInfoKHR ci = { .sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR, .surface = surf, .minImageCount = n,
         .imageFormat = sc_format, .imageColorSpace = cs, .imageExtent = sc_extent, .imageArrayLayers = 1,
         .imageUsage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT,
-        .preTransform = caps.currentTransform, .compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR,
+        .preTransform = transform, .compositeAlpha = alpha,
         .presentMode = present_mode(), .clipped = VK_TRUE, .oldSwapchain = swap };
     VkSwapchainKHR old = swap;
     VK(vkCreateSwapchainKHR(dev, &ci, NULL, &swap));
@@ -459,6 +477,18 @@ static int recreate_swapchain(void) {
     pthread_mutex_lock(&queue_lock); vkDeviceWaitIdle(dev); pthread_mutex_unlock(&queue_lock);
     return create_swapchain();
 }
+/* the window's surface again, and its swapchain: Android destroys the window's surface while the app is in the
+   background (VK_ERROR_SURFACE_LOST_KHR, or the foreground again: SDL_APP_DIDENTERFOREGROUND) */
+static int surface_reset;
+static int recreate_surface(void) {
+    pthread_mutex_lock(&queue_lock); vkDeviceWaitIdle(dev); pthread_mutex_unlock(&queue_lock);
+    if (swap) { vkDestroySwapchainKHR(dev, swap, NULL); swap = VK_NULL_HANDLE; }
+    vkDestroySurfaceKHR(inst, surf, NULL); surf = VK_NULL_HANDLE;
+    if (!SDL_Vulkan_CreateSurface(win, inst, &surf)) { fprintf(stderr, "video: surface: %s\n", SDL_GetError()); return -1; }
+    VkBool32 pres = 0; vkGetPhysicalDeviceSurfaceSupportKHR(phys, qfam, surf, &pres);
+    fprintf(stderr, "video: the window's surface again (presentable %d)\n", (int)pres);
+    return create_swapchain();
+}
 
 int video_init(int scale) {
     /* every pad's face buttons by position (A = bottom), as input.c, glyphs.cpp and the settings take them: SDL 2 names a
@@ -467,7 +497,12 @@ int video_init(int scale) {
     if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS | (g_input_none ? 0 : SDL_INIT_GAMECONTROLLER | SDL_INIT_JOYSTICK))) { fprintf(stderr, "video: SDL_Init: %s\n", SDL_GetError()); return -1; }
     static const int cw[L_COUNT] = { TOP_W, TOP_W + BOT_W, TOP_W + BOT_W / 2, TOP_W, BOT_W, 0, TOP_W }, chh[L_COUNT] = { 2 * SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, SCR_H, 2 * SCR_H };
     int win_w = opt_layout == L_SINGLE ? (int)lroundf(SCR_H * scale * opt_window_aspect) : cw[opt_layout] * scale;   /* single: 16:9 (1280x720 at 3) */
-    win = SDL_CreateWindow("Metroid: Samus Returns", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, chh[opt_layout] * scale, SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE);
+#ifdef __ANDROID__
+    const Uint32 win_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_FULLSCREEN;   /* the whole screen, without the system bars */
+#else
+    const Uint32 win_flags = SDL_WINDOW_VULKAN | SDL_WINDOW_RESIZABLE;
+#endif
+    win = SDL_CreateWindow("Metroid: Samus Returns", SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED, win_w, chh[opt_layout] * scale, win_flags);
     if (!win) { fprintf(stderr, "video: SDL_CreateWindow: %s\n", SDL_GetError()); return -1; }
     SDL_SetWindowMinimumSize(win, BOT_W, SCR_H);
     if (opt_fs) apply_fullscreen();
@@ -506,16 +541,25 @@ int video_init(int scale) {
     for (uint32_t i = 0; i < nde; i++) if (!strcmp(dep[i].extensionName, VK_EXT_HDR_METADATA_EXTENSION_NAME)) has_hdr_metadata = 1;
     free(dep);
     if (pp.apiVersion >= VK_API_VERSION_1_3) vkGetPhysicalDeviceFeatures2(phys, &f2);
-    vk13 = pp.apiVersion >= VK_API_VERSION_1_3 && f13.dynamicRendering && f13.shaderDemoteToHelperInvocation && has_push;
+    /* push descriptors where the device has them, else descriptor sets in their place (vk_push.c) */
+    vk13 = pp.apiVersion >= VK_API_VERSION_1_3 && f13.dynamicRendering && f13.shaderDemoteToHelperInvocation;
     VkPhysicalDeviceVulkan13Features en13 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES, .dynamicRendering = VK_TRUE, .shaderDemoteToHelperInvocation = VK_TRUE };
     VkPhysicalDeviceFeatures2 en2 = { .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &en13 };
     en2.features.samplerAnisotropy = f2.features.samplerAnisotropy;   /* pica_vk.c: anisotropic filtering option */
-    const char *dext[3] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME, VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME }; uint32_t ndext = vk13 ? 2 : 1;
+    const char *dext[3] = { VK_KHR_SWAPCHAIN_EXTENSION_NAME }; uint32_t ndext = 1;
+    if (vk13 && has_push) dext[ndext++] = VK_KHR_PUSH_DESCRIPTOR_EXTENSION_NAME;
     if (vk13 && has_hdr_metadata) dext[ndext++] = VK_EXT_HDR_METADATA_EXTENSION_NAME; else has_hdr_metadata = 0;
     VkDeviceCreateInfo dci = { .sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, .pNext = vk13 ? &en2 : NULL, .queueCreateInfoCount = 1, .pQueueCreateInfos = &qci,
         .enabledExtensionCount = ndext, .ppEnabledExtensionNames = dext };
-    if (!vk13) fprintf(stderr, "video: no Vulkan 1.3 dynamic rendering/push descriptors: hardware PICA renderer and GPU presenter unavailable\n");
+    if (!vk13) fprintf(stderr, "video: no Vulkan 1.3 dynamic rendering: hardware PICA renderer and GPU presenter unavailable "
+                       "(Vulkan %u.%u, dynamic rendering %d, demote to helper %d)\n",
+                       VK_API_VERSION_MAJOR(pp.apiVersion), VK_API_VERSION_MINOR(pp.apiVersion), (int)f13.dynamicRendering,
+                       (int)f13.shaderDemoteToHelperInvocation);
     VK(vkCreateDevice(phys, &dci, NULL, &dev));
+    if (vk13) vk_push_init(dev, has_push);
+#ifdef __ANDROID__
+    { extern void msr_vk13_load(VkDevice d); if (vk13) msr_vk13_load(dev); }   /* vk13_android.c */
+#endif
     vkGetDeviceQueue(dev, qfam, 0, &queue);
     /* swapchain format first (the presenter's target uses it), then the presenter, then the swapchain-sized resources */
     { VkFormat h10, scrgb; VkColorSpaceKHR cs; surface_formats(&sdr_format, &cs, &h10, &scrgb); sc_format = sdr_format; }
@@ -718,7 +762,7 @@ static void gpu_quad_view(VkPipeline pl, VkImageView view, uint32_t tw, uint32_t
     VkDescriptorImageInfo ii = { smp_linear, view, lay };
     VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii };
     vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pl);
-    push_desc(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, play, 0, 1, &w);
+    vk_push(&push_arena, cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, play, 0, 1, &w);
     vkCmdPushConstants(cmdbuf, play, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof p, &p);
     vkCmdDraw(cmdbuf, 4, 1, 0, 0);
 }
@@ -730,7 +774,7 @@ static void msr_quad(const MsrQuad *q, const Img *bottom, float W, float H) {
                   { q->feather, q->circle, 0, 0 }, { q->color[0], q->color[1], q->color[2], q->color[3] } };
     VkDescriptorImageInfo ii = { smp_linear, bottom->view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL };
     VkWriteDescriptorSet w = { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii };
-    push_desc(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, play_msr, 0, 1, &w);
+    vk_push(&push_arena, cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, play_msr, 0, 1, &w);
     vkCmdPushConstants(cmdbuf, play_msr, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof p, &p);
     vkCmdDraw(cmdbuf, 4, 1, 0, 0);
 }
@@ -852,6 +896,15 @@ int video_frame(void) {
     float msx = ww > 0 ? (float)dw0 / (float)ww : 1.f, msy = wh > 0 ? (float)dh0 / (float)wh : 1.f;   /* the overlay's mouse: drawable pixels */
     while (SDL_PollEvent(&e)) {
         if (e.type == SDL_QUIT) return 0;
+#ifdef __ANDROID__
+        if (e.type == SDL_APP_DIDENTERFOREGROUND) { surface_reset = 1; continue; }   /* a new window surface */
+        if ((e.type == SDL_KEYDOWN || e.type == SDL_KEYUP) && e.key.keysym.sym == SDLK_AC_BACK) {
+            /* Back: the menu, as F1; in the launcher, out of what is open, as Escape */
+            const int launcher = msr_overlay_launcher_mode();
+            e.key.keysym.sym = launcher ? SDLK_ESCAPE : SDLK_F1;
+            e.key.keysym.scancode = launcher ? SDL_SCANCODE_ESCAPE : SDL_SCANCODE_F1;
+        }
+#endif
         /* the settings overlay: F1 and Select (its binding) open and close it; while it shows, or waits for a key or button to
            bind, it takes the input */
         if (!msr_overlay_capturing()) {
@@ -1034,13 +1087,16 @@ int video_frame(void) {
     /* minimised, the swapchain waits at size 0 (create_swapchain). SDL keeps the window's size through a minimise, so
        the size check above never sees the restore: try again once the window is back, or the picture froze for good */
     if (swap && (!sc_extent.width || !sc_extent.height) && !(SDL_GetWindowFlags(win) & SDL_WINDOW_MINIMIZED)) { if (recreate_swapchain()) return 0; }
+    if (surface_reset) { surface_reset = 0; if (recreate_surface()) return 0; }
     if (!swap || !sc_extent.width || !sc_extent.height) return 1;
 
     vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX);
+    vk_push_reset(&push_arena);   /* the last frame's sets are done with */
     uint32_t idx;
     VkResult r = vkAcquireNextImageKHR(dev, swap, UINT64_MAX, sem_acquire, VK_NULL_HANDLE, &idx);
     if (r != VK_SUCCESS && r != VK_SUBOPTIMAL_KHR) { g_vid_acquire_fail++; g_vid_last_err = r; }
     if (r == VK_ERROR_OUT_OF_DATE_KHR) return recreate_swapchain() ? 0 : 1;
+    if (r == VK_ERROR_SURFACE_LOST_KHR) { surface_reset = 1; return 1; }
     vkResetFences(dev, 1, &fence);
     layout_rects((int)sc_extent.width, (int)sc_extent.height, &rt, &rb);   /* drawable pixels (differs from window size on HiDPI) */
     /* Samus Returns' single screen: the compositor places the view (the gallery moves it aside) and lists the HUD
@@ -1112,7 +1168,7 @@ int video_frame(void) {
             VkWriteDescriptorSet wds[2] = { { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 0, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[0] },
                                             { .sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstBinding = 1, .descriptorCount = 1, .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii[1] } };
             vkCmdBindPipeline(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe_hdr);
-            push_desc(cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, play_hdr, 0, 2, wds);
+            vk_push(&push_arena, cmdbuf, VK_PIPELINE_BIND_POINT_GRAPHICS, play_hdr, 0, 2, wds);
             vkCmdPushConstants(cmdbuf, play_hdr, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof hp, &hp);
             vkCmdDraw(cmdbuf, 4, 1, 0, 0);
             vkCmdEndRendering(cmdbuf);
@@ -1142,6 +1198,9 @@ int video_frame(void) {
     VkPresentInfoKHR pi = { .sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR, .waitSemaphoreCount = 1, .pWaitSemaphores = &sem_done[idx], .swapchainCount = 1, .pSwapchains = &swap, .pImageIndices = &idx };
     r = vkQueuePresentKHR(queue, &pi);
     pthread_mutex_unlock(&queue_lock);
+#ifdef __ANDROID__
+    if (r == VK_SUBOPTIMAL_KHR) r = VK_SUCCESS;   /* not pre-rotated (create_swapchain: the compositor turns it), every frame */
+#endif
     if (r != VK_SUCCESS) { g_vid_present_fail++; g_vid_last_err = r; } else g_vid_presented++;
     if (r == VK_ERROR_OUT_OF_DATE_KHR || r == VK_SUBOPTIMAL_KHR) recreate_swapchain();
     return 1;

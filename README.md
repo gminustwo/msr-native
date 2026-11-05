@@ -33,11 +33,25 @@ The user folder is `user/` beside the program (Windows; Linux when one is there,
 `%LOCALAPPDATA%\msr-native` or `~/.local/share/msr-native`. `MSR_NATIVE_HOME` overrides it. The launcher logs to
 `user/launcher.log`, the game to `user/msr-native.log`.
 
+## Android
+
+The Android app (`native/android`, `io.github.gminustwo.msrnative`) is the same program as `libmain.so` in SDL's
+activity, with the same launcher. A phone cannot run the recompiler, so the PC's launcher builds the Android native
+code too: **Build for Android** on its Game tab runs `build_module.py --target android-arm64`, which cross-compiles
+the same generated code for AArch64 with the kit's Zig into `user/msr/recomp-android/` (`libmsr_aot.so`, no imports;
+`src/core/arm/msr_aot/a64/` stands in for the SSE intrinsics, on FPCR, and is part of the Android runtime's hash).
+The player copies that folder and the game file into the app's user folder, `Android/data/io.github.gminustwo.msrnative/files/user`
+(a PC reaches it over USB); the launcher finds the game file there and copies the native code to the app's private
+folder before loading it (`native/runtime/android.c`). Play, Restart and Quit start the app again in a new process
+(`MsrActivity.relaunch`), as the PC's launcher and game are separate processes. Vulkan 1.3 with dynamic rendering;
+push descriptors where the device has them, else descriptor sets in their place (`native/runtime/vk_push.c`). A
+controller (or keyboard) is needed to play: there are no touch controls. Back opens the game's menu.
+
 ## Layout
 
 | Folder | What |
 | --- | --- |
-| `native/` | msr-native: the runtime (`runtime/`), Samus Returns' features (`runtime/msr/`), shaders, CMake |
+| `native/` | msr-native: the runtime (`runtime/`), Samus Returns' features (`runtime/msr/`), shaders, CMake, the Android app (`android/`) |
 | `src/msr/` | Samus Returns code shared with the emulator-based build: settings menu, touch navigation, HUD layout, button icons, cheats, frame-rate patches |
 | `src/common/`, `src/core/arm/` | the few helpers those need, the recompiled module's interface (`msr_aot/aot_runtime.h`) and the ARM11 timing table |
 | `externals/msr-imgui/` | Dear ImGui (MIT), unmodified |
@@ -68,10 +82,16 @@ python tools/package/windows.py                  # dist/msr-native-<version>-win
 # headers):
 wsl -d Ubuntu --cd /mnt/d/Games/pcports/msr-native -- env MSR_JOBS=8 bash tools/package/appimage.sh \
     /home/lou/msr-native-build /home/lou/samus-build/src/externals/sdl2/SDL /home/lou/samus-build/src/externals/zstd
+# Android, from PowerShell (Android SDK with NDK 27.3.13750724 and CMake 3.31.6, JDK 17+; the sources: SDL2 2.32.10,
+# zstd 1.5.7 and libpng 1.6.47 release tarballs, unpacked; MSR_ANDROID_KEYSTORE/_PASS/_ALIAS: the release key):
+cd native/android
+./gradlew.bat assembleRelease --max-workers=8 -Pmsr.sdl2=<SDL2-2.32.10> -Pmsr.zstd=<zstd-1.5.7> -Pmsr.png=<libpng-1.6.47>
+# -> native/android/app/build/outputs/apk/release/msr-native-<version>-android-arm64.apk
 ```
 
 The version is `MSR_NATIVE_VERSION` in `native/CMakeLists.txt`. Each package holds the program, the recompiler
-(`recomp/`), `tools/package/README.txt` and the licences.
+(`recomp/`), `tools/package/README.txt` and the licences. The APK holds the program and SDL2 only (the native code
+comes from the PC's Build for Android); its native build is capped at `msr.jobs` (8) compiles by CMake job pools.
 
 Updates: the launcher checks the releases of `MSR_UPDATE_REPO` (`native/CMakeLists.txt`, `gminustwo/msr-native`) on
 GitHub each time it starts, and offers the newest one above its own version that has the player's package (Update now,

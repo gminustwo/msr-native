@@ -36,6 +36,11 @@
 #else
 #include <unistd.h>
 #endif
+#ifdef __ANDROID__
+#include "android.h"
+#include <SDL_hints.h>
+#include <SDL_main.h>   /* main is SDL_main there, which SDL's Java side runs (android_main below) */
+#endif
 
 int g_input_none, g_mute;
 extern const char *g_romfs_path;
@@ -269,6 +274,33 @@ static void log_buffered(void) {
 int msr_launcher_main(void);
 int msr_launcher_direct(void);
 
+#ifdef __ANDROID__
+/* The Android app runs one of the two in each process (android.c): the launcher (no arguments), whose Play starts the
+   app again with the game's arguments, or the game, after which the app comes back as the launcher (Quit, the game's
+   end, or a failure to start), or as the game again (Restart). Closed by the player (the window), it stays closed. */
+static int g_android_argc; static const char *const *g_android_argv;
+static void android_after_game(int relaunch_game, int relaunch_launcher) {
+    if (relaunch_game) msr_android_relaunch(g_android_argc - 1, g_android_argv + 1);
+    if (relaunch_launcher) msr_android_relaunch(0, NULL);
+}
+static int msr_main(int argc, char **argv);
+int main(int argc, char **argv) {   /* SDL_main */
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");   /* Back is the menu's (input.c), not the end of the app */
+    SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
+    if (chdir(msr_android_root())) return 1;   /* the paths are user/..., as in the PC's folder */
+    if (argc > 1) {
+        mkdir("user", 0777);
+        if (freopen("user/msr-native.log", "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);   /* the launcher's is its own */
+    }
+    g_android_argc = argc; g_android_argv = (const char *const *)argv;
+    const int r = msr_main(argc, argv);
+    if (argc > 1) android_after_game(0, 1);   /* it could not start (the log says why) */
+    return r;
+}
+#undef main
+#define main msr_main
+#endif
+
 int main(int argc, char **argv) {
 #ifdef _WIN32
     {   /* a window program: from a console without a redirection, the log goes to that console */
@@ -315,6 +347,8 @@ int main(int argc, char **argv) {
     if (!module) {
 #ifdef _WIN32
         snprintf(module_path, sizeof module_path, "user/msr/recomp/msr_aot.dll");
+#elif defined(__ANDROID__)
+        snprintf(module_path, sizeof module_path, "user/msr/recomp-android/libmsr_aot.so");   /* built on a PC */
 #else
         snprintf(module_path, sizeof module_path, "user/msr/recomp/libmsr_aot.so");
 #endif
@@ -349,6 +383,9 @@ int main(int argc, char **argv) {
     video_set_fps(fps);
     msr_apply_patches();
     if (!exists(module)) { fprintf(stderr, "native: no recompiled code at %s: build it in the launcher (Native code)\n", module); return 1; }
+#ifdef __ANDROID__
+    module = msr_android_module(module);   /* to the app's private folder, where Android loads code from */
+#endif
     if (rt_module_load(module)) return 1;
     msr_patches_module_loaded();
     if (g_code_orig) {   /* a game mod changed the code: the functions it changed run on the interpreter */
@@ -439,6 +476,9 @@ int main(int argc, char **argv) {
        chosen (2026-11-03, Steam Deck: the launcher waited for it). Windows' runtime does not wait there. */
     { extern void dsp_close_wav(void); dsp_close_wav(); }   /* PWR_DSP_WAV's header (atexit) */
     fflush(NULL);
+#ifdef __ANDROID__
+    android_after_game(g_exit == MSR_EXIT_RESTART, *done || g_exit == 0);   /* the window closed: the app stays closed */
+#endif
     _exit(g_exit > 0 ? g_exit : 0);
 #endif
     return g_exit > 0 ? g_exit : 0;

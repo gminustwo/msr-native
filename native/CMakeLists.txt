@@ -4,7 +4,7 @@
 # Compilers: GCC or Clang (MinGW-w64 on Windows). Needs SDL2, Vulkan headers and loader, glslc.
 cmake_minimum_required(VERSION 3.16)
 project(msr_native C CXX)
-set(MSR_NATIVE_VERSION "0.2.0")   # the launcher shows it; the native code's module.json records it
+set(MSR_NATIVE_VERSION "0.3.0")   # the launcher shows it; the native code's module.json records it
 # Where the launcher looks for newer releases (GitHub owner/repository; its releases must be public): their packages,
 # as tools/package names them, update the installation in place (launcher.cpp)
 set(MSR_UPDATE_REPO "gminustwo/msr-native" CACHE STRING "GitHub repository whose releases the launcher offers as updates")
@@ -18,6 +18,15 @@ set(MSR_AOT_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../src/core/arm/msr_aot)
 # The module is accepted only when it was compiled against the same aot_runtime.h (as src/core/CMakeLists.txt checks).
 file(READ ${MSR_AOT_DIR}/aot_runtime.h MSR_AOT_RUNTIME_TEXT)
 string(REPLACE "\r" "" MSR_AOT_RUNTIME_TEXT "${MSR_AOT_RUNTIME_TEXT}")
+# On AArch64 (the Android app) aot_runtime.h's SSE intrinsics are a64/msr_sse_a64.h's: that header is part of the
+# runtime the native code must match, as build_module.py --target android-arm64 hashes it.
+set(MSR_A64 OFF)
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64|ARM64)$")
+    set(MSR_A64 ON)
+    file(READ ${MSR_AOT_DIR}/a64/msr_sse_a64.h MSR_A64_TEXT)
+    string(REPLACE "\r" "" MSR_A64_TEXT "${MSR_A64_TEXT}")
+    string(APPEND MSR_AOT_RUNTIME_TEXT "${MSR_A64_TEXT}")
+endif()
 string(SHA256 MSR_AOT_RUNTIME_SHA256 "${MSR_AOT_RUNTIME_TEXT}")
 if (CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)   # inside the main build, src/core already depends on it
     set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${MSR_AOT_DIR}/aot_runtime.h)
@@ -27,7 +36,18 @@ find_package(Threads REQUIRED)
 find_package(Vulkan REQUIRED)
 # SDL2 built from a source folder (static: nothing to ship), e.g. for an AppImage on a system without SDL2's headers
 set(MSR_SDL2_SOURCE "" CACHE PATH "Build SDL2 statically from this source folder instead of using the system's")
-if (MSR_SDL2_SOURCE AND NOT TARGET SDL2::SDL2)
+if (ANDROID AND NOT MSR_SDL2_SOURCE)
+    message(FATAL_ERROR "msr-native: the Android app needs MSR_SDL2_SOURCE (SDL 2's source; its Java side is the app's)")
+endif()
+if (MSR_SDL2_SOURCE AND ANDROID AND NOT TARGET SDL2::SDL2)
+    # Android: libSDL2.so beside the program's libmain.so, as SDL's Java side (SDLActivity) loads them
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    set(SDL2_DISABLE_SDL2MAIN ON CACHE BOOL "" FORCE)
+    add_subdirectory(${MSR_SDL2_SOURCE} ${CMAKE_CURRENT_BINARY_DIR}/sdl2 EXCLUDE_FROM_ALL)
+    add_library(SDL2::SDL2 ALIAS SDL2)
+elseif (MSR_SDL2_SOURCE AND NOT TARGET SDL2::SDL2)
     set(SDL_SHARED OFF CACHE BOOL "" FORCE)
     set(SDL_STATIC ON CACHE BOOL "" FORCE)
     set(SDL_TEST OFF CACHE BOOL "" FORCE)
@@ -38,6 +58,13 @@ if (MSR_SDL2_SOURCE AND NOT TARGET SDL2::SDL2)
 endif()
 if (NOT TARGET SDL2::SDL2)   # inside the main build the system SDL2 may already be found
     find_package(SDL2 REQUIRED)
+endif()
+if (ANDROID AND NOT GLSLC)   # the Android app: the NDK's own (shader-tools/<host>/glslc)
+    file(GLOB MSR_NDK_GLSLC ${ANDROID_NDK}/shader-tools/*/glslc ${ANDROID_NDK}/shader-tools/*/glslc.exe)
+    if (MSR_NDK_GLSLC)
+        list(GET MSR_NDK_GLSLC 0 MSR_NDK_GLSLC)
+        set(GLSLC ${MSR_NDK_GLSLC} CACHE FILEPATH "glslc")
+    endif()
 endif()
 find_program(GLSLC glslc)
 if (NOT GLSLC)
@@ -68,10 +95,10 @@ foreach(sh pica.vert pica_vs.vert pica.frag present.vert present.frag fsr_easu.f
 endforeach()
 msr_shader(pica_nd.frag.inc pica.frag -DNO_FRAG_DEPTH)
 
-add_executable(msr-native
+set(MSR_NATIVE_SOURCES
   runtime/main.c runtime/kernel.c runtime/services.c runtime/fs.c runtime/dump.c runtime/gsp.c runtime/pica.c runtime/video.c
   runtime/dsp.c runtime/pica_sw.c runtime/input.c runtime/pica_vk.c runtime/pica_vsgen.c runtime/runtime.c
-  runtime/stubs.c runtime/interp.c runtime/interp_full.c runtime/dispatch.cpp runtime/state.c
+  runtime/stubs.c runtime/interp.c runtime/interp_full.c runtime/dispatch.cpp runtime/state.c runtime/vk_push.c
   runtime/msr/settings.cpp runtime/msr/patches.cpp runtime/msr/compositor.cpp runtime/msr/cheats.cpp runtime/msr/camera_fov.cpp runtime/msr/glyphs.cpp
   runtime/msr/textures.cpp ${CMAKE_CURRENT_SOURCE_DIR}/../src/common/cityhash.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/../src/msr/touch_nav.cpp
@@ -82,6 +109,20 @@ add_executable(msr-native
   ${SHO}/present.vert.inc ${SHO}/present.frag.inc
   ${SHO}/fsr_easu.frag.inc ${SHO}/fsr_rcas.frag.inc ${SHO}/pica_nd.frag.inc ${SHO}/msr.vert.inc ${SHO}/msr.frag.inc
   ${SHO}/hdr.frag.inc)
+if (ANDROID)
+    # The Android app (native/android): this program as libmain.so, which SDL's Java side loads and runs (SDL_main);
+    # runtime/android.c is what it asks of the app's Java side (MsrActivity)
+    add_library(msr-native SHARED ${MSR_NATIVE_SOURCES} runtime/android.c runtime/vk13_android.c)
+    set_target_properties(msr-native PROPERTIES OUTPUT_NAME main)
+    target_link_libraries(msr-native PRIVATE android log)
+    # The guest's floating point as the 3DS computes it: no fused multiply-adds (AArch64 compilers fuse by default)
+    target_compile_options(msr-native PRIVATE -ffp-contract=off)
+else()
+    add_executable(msr-native ${MSR_NATIVE_SOURCES})
+endif()
+if (MSR_A64)
+    target_include_directories(msr-native BEFORE PRIVATE ${MSR_AOT_DIR}/a64)   # <emmintrin.h>, <xmmintrin.h>
+endif()
 # Samus Returns' features share src/msr's headers with the emulator-based build (msr/compat: the types they use).
 target_include_directories(msr-native PRIVATE runtime/msr/compat runtime ${SHO} ${MSR_AOT_DIR}
                            ${CMAKE_CURRENT_SOURCE_DIR}/../src)
@@ -131,7 +172,23 @@ if (ZLIB_FOUND)
     target_link_libraries(msr-native PRIVATE ZLIB::ZLIB)
 endif()
 # Texture packs need libpng (MSYS2: mingw-w64-ucrt-x86_64-libpng; Linux: libpng-dev); without it they are left out.
-find_package(PNG)
+# MSR_PNG_SOURCE: built statically from a libpng source folder (the Android app, whose NDK has zlib but no libpng)
+set(MSR_PNG_SOURCE "" CACHE PATH "Build libpng statically from this source folder instead of using the system's")
+if (MSR_PNG_SOURCE AND ZLIB_FOUND AND NOT TARGET PNG::PNG)
+    set(PNG_SHARED OFF CACHE BOOL "" FORCE)
+    set(PNG_STATIC ON CACHE BOOL "" FORCE)
+    set(PNG_TESTS OFF CACHE BOOL "" FORCE)
+    set(PNG_TOOLS OFF CACHE BOOL "" FORCE)
+    set(PNG_FRAMEWORK OFF CACHE BOOL "" FORCE)
+    set(SKIP_INSTALL_ALL ON CACHE BOOL "" FORCE)
+    add_subdirectory(${MSR_PNG_SOURCE} ${CMAKE_CURRENT_BINARY_DIR}/libpng EXCLUDE_FROM_ALL)
+    set_target_properties(png_static PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(png_static PUBLIC ${MSR_PNG_SOURCE} ${CMAKE_CURRENT_BINARY_DIR}/libpng)
+    add_library(PNG::PNG ALIAS png_static)
+    set(PNG_FOUND TRUE)
+else()
+    find_package(PNG)
+endif()
 if (PNG_FOUND)
     target_compile_definitions(msr-native PRIVATE MSR_HAVE_PNG)
     target_link_libraries(msr-native PRIVATE PNG::PNG)
